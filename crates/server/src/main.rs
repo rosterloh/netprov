@@ -1,43 +1,60 @@
 use clap::{Parser, Subcommand};
 use netprov_server::keygen::{run_keygen, KeygenArgs};
+use netprov_server::logging::{log_startup_banner, spawn_dev_key_warn_loop};
+use netprov_server::{load_key, LoadOptions, MockFacade, RateLimiter};
+use netprov_server::server_loop::run_tcp_server;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "netprovd", about = "netprov daemon")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Cmd>,
+    command: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Generate a new 32-byte PSK. Optionally install it to disk.
+    /// Generate a PSK. Optionally install it.
     Keygen {
-        /// Write the generated key to the install path (default /etc/netprov/key).
         #[arg(long)]
         install: bool,
-        /// Override the install path.
         #[arg(long, short = 'o')]
         out: Option<PathBuf>,
     },
+    /// Run the loopback TCP server (Part 1 only). Uses MockFacade.
+    Serve {
+        /// TCP listen address.
+        #[arg(long, default_value = "127.0.0.1:9600")]
+        listen: String,
+    },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {
-        Some(Cmd::Keygen { install, out }) => {
-            let args = KeygenArgs {
+        Cmd::Keygen { install, out } => {
+            run_keygen(KeygenArgs {
                 install,
                 install_path: out.unwrap_or_else(|| "/etc/netprov/key".into()),
-            };
-            run_keygen(args, &mut std::io::stdout())?;
-            Ok(())
+            }, &mut std::io::stdout())?;
         }
-        None => {
-            // Default: run the daemon. Loop integration lands in Part 2
-            // (BLE wiring); for now, print a usage note.
-            eprintln!("Part 1 build: BLE server not wired yet. Use `netprovd keygen`.");
-            std::process::exit(1);
+        Cmd::Serve { listen } => {
+            let production = std::env::var("NETPROV_PRODUCTION").ok().as_deref() == Some("1");
+            let env_path = std::env::var_os("NETPROV_KEY_PATH").map(PathBuf::from);
+            let key = load_key(LoadOptions {
+                env_path,
+                default_path: "/etc/netprov/key".into(),
+                production,
+            })?;
+            log_startup_banner(&key.source);
+            let _warn_task = spawn_dev_key_warn_loop(key.source.clone());
+            let facade = Arc::new(MockFacade::new());
+            let rl = Arc::new(RateLimiter::with_defaults());
+            run_tcp_server(&listen, key.psk, facade, rl).await?;
         }
     }
+    Ok(())
 }

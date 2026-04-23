@@ -5,6 +5,7 @@ use netprov_protocol::{read_message, write_message, TransportError};
 use netprov_protocol::*;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, ToSocketAddrs};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, thiserror::Error)]
@@ -77,5 +78,35 @@ where
 
         let out = encode(&reply)?;
         write_message(&mut w, &out).await?;
+    }
+}
+
+pub async fn run_tcp_server<F, A>(
+    addr: A,
+    psk: Psk,
+    facade: Arc<F>,
+    rate_limiter: Arc<RateLimiter>,
+) -> anyhow::Result<()>
+where
+    F: NetworkFacade + 'static,
+    A: ToSocketAddrs,
+{
+    let listener = TcpListener::bind(addr).await?;
+    info!(addr = %listener.local_addr()?, "netprov tcp loopback listener");
+    loop {
+        let (sock, peer) = listener.accept().await?;
+        let facade = facade.clone();
+        let rl = rate_limiter.clone();
+        let peer_id = peer.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = run_server(
+                sock,
+                ServerConfig { psk, peer_id: peer_id.clone() },
+                facade,
+                rl,
+            ).await {
+                warn!(peer = %peer_id, error = ?e, "session ended with error");
+            }
+        });
     }
 }

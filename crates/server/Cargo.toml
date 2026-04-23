@@ -17,7 +17,7 @@ live-nm = ["dep:nmrs", "dep:zbus"]
 
 [dependencies]
 netprov-protocol = { path = "../protocol" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 serde.workspace = true
 ciborium.workspace = true
 anyhow.workspace = true

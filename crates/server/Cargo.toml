@@ -1,0 +1,44 @@
+[package]
+name = "netprov-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "netprovd"
+path = "src/main.rs"
+
+[features]
+default = ["mock"]
+mock = []
+live-nm = ["dep:nmrs", "dep:zbus"]
+
+[dependencies]
+netprov-protocol = { path = "../protocol" }
+tokio.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-journald.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+rand.workspace = true
+tokio-util.workspace = true
+ipnet = { workspace = true, features = ["serde"] }
+qrcode = "0.14"
+base64 = "0.22"
+
+nmrs = { version = "2", optional = true }
+zbus = { version = "5", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+proptest.workspace = true

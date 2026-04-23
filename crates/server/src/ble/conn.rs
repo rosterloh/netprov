@@ -9,7 +9,7 @@ use crate::rate_limit::RateLimiter;
 use crate::session::{dispatch, Session};
 use netprov_protocol::{
     decode_request, encode_response, fragment, parse_frame, InfoPayload, ProtocolError,
-    Reassembler, Request, Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN,
+    Reassembler, Request, Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, TAG_LEN,
     PROTOCOL_VERSION, PSK_LEN,
 };
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,9 @@ pub struct PeerSession<F: NetworkFacade> {
     pub reassembler: Mutex<Reassembler>,
     pub notify_tx: NotifyTx,
     pub model: String,
+    /// Handles to in-flight dispatch tasks. Kept only so they aren't detached;
+    /// future hardening: abort on peer disconnect (currently we rely on
+    /// tokio runtime shutdown to drop them).
     pub dispatch_handles: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -68,7 +71,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
 
     /// AuthResponse write handler — returns true on success.
     pub fn on_auth(&self, tag: Vec<u8>) -> bool {
-        if tag.len() != NONCE_LEN {
+        if tag.len() != TAG_LEN {
             return false;
         }
         self.session.lock().unwrap().submit_auth(&tag)
@@ -123,6 +126,8 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                     return;
                 }
             };
+            // fragment's third arg is total frame size (body + 5-byte header);
+            // MAX_PAYLOAD_PER_FRAME = 507, so +5 gives the 512-byte BLE ceiling.
             let frames = fragment(resp.request_id, &bytes, MAX_PAYLOAD_PER_FRAME + 5);
             for f in frames {
                 if this.notify_tx.send(f).is_err() {

@@ -37,7 +37,11 @@ pub fn run_keygen(args: KeygenArgs, out: &mut dyn std::io::Write) -> Result<(), 
     writeln!(out)?;
 
     let qr = QrCode::new(b64.as_bytes()).map_err(|e| KeygenError::Qr(e.to_string()))?;
-    let ascii = qr.render::<Dense1x2>().dark_color(Dense1x2::Dark).light_color(Dense1x2::Light).build();
+    let ascii = qr
+        .render::<Dense1x2>()
+        .dark_color(Dense1x2::Dark)
+        .light_color(Dense1x2::Light)
+        .build();
     writeln!(out, "{ascii}")?;
 
     if args.install {
@@ -51,7 +55,11 @@ pub fn run_keygen(args: KeygenArgs, out: &mut dyn std::io::Write) -> Result<(), 
             .mode(0o600)
             .open(&args.install_path)?;
         std::io::Write::write_all(&mut f, &psk)?;
-        writeln!(out, "Installed to: {} (0600 root:root)", args.install_path.display())?;
+        writeln!(
+            out,
+            "Installed to: {} (0600 root:root)",
+            args.install_path.display()
+        )?;
     }
     Ok(())
 }
@@ -74,10 +82,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("k");
         let mut buf = Vec::new();
-        run_keygen(KeygenArgs {
-            install: true,
-            install_path: path.clone(),
-        }, &mut buf).unwrap();
+        run_keygen(
+            KeygenArgs {
+                install: true,
+                install_path: path.clone(),
+            },
+            &mut buf,
+        )
+        .unwrap();
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
         assert_eq!(meta.len(), PSK_LEN as u64);

@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use netprov_server::keygen::{run_keygen, KeygenArgs};
 use netprov_server::logging::{log_startup_banner, spawn_dev_key_warn_loop};
-use netprov_server::{load_key, LoadOptions, MockFacade, RateLimiter};
 use netprov_server::server_loop::run_tcp_server;
+use netprov_server::{load_key, LoadOptions, MockFacade, RateLimiter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,10 +36,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Keygen { install, out } => {
-            run_keygen(KeygenArgs {
-                install,
-                install_path: out.unwrap_or_else(|| "/etc/netprov/key".into()),
-            }, &mut std::io::stdout())?;
+            run_keygen(
+                KeygenArgs {
+                    install,
+                    install_path: out.unwrap_or_else(|| "/etc/netprov/key".into()),
+                },
+                &mut std::io::stdout(),
+            )?;
         }
         Cmd::Serve { listen } => {
             let production = std::env::var("NETPROV_PRODUCTION").ok().as_deref() == Some("1");

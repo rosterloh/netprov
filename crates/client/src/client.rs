@@ -28,7 +28,13 @@ pub struct Client<IO> {
 impl<IO: AsyncRead + AsyncWrite> Client<IO> {
     pub fn new(io: IO, psk: Psk) -> Self {
         let (r, w) = tokio::io::split(io);
-        Self { r, w, psk, next_id: 1, authenticated: false }
+        Self {
+            r,
+            w,
+            psk,
+            next_id: 1,
+            authenticated: false,
+        }
     }
 
     pub async fn authenticate(&mut self) -> Result<(), ClientError> {
@@ -60,11 +66,15 @@ impl<IO: AsyncRead + AsyncWrite> Client<IO> {
     pub async fn request(&mut self, op: Op) -> Result<OpResult, ClientError> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.send(Envelope::Req(Request { request_id: id, op })).await?;
+        self.send(Envelope::Req(Request { request_id: id, op }))
+            .await?;
         match self.recv().await? {
             Envelope::Resp(resp) => {
                 if resp.request_id != id {
-                    return Err(ClientError::IdMismatch { expected: id, got: resp.request_id });
+                    return Err(ClientError::IdMismatch {
+                        expected: id,
+                        got: resp.request_id,
+                    });
                 }
                 resp.result.map_err(Into::into)
             }

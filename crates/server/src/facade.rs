@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use netprov_protocol::{Interface, IpConfig, NetError, StaticIpv4, WifiCredential, WifiNetwork, WifiStatus};
+use netprov_protocol::{
+    Interface, IpConfig, NetError, StaticIpv4, WifiCredential, WifiNetwork, WifiStatus,
+};
 
 #[async_trait]
 pub trait NetworkFacade: Send + Sync {

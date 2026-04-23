@@ -19,12 +19,22 @@ pub struct InfoPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     ListInterfaces,
-    GetIpConfig { iface: String },
+    GetIpConfig {
+        iface: String,
+    },
     WifiStatus,
     WifiScan,
-    SetDhcp { iface: String },
-    SetStaticIpv4 { iface: String, cfg: StaticIpv4 },
-    ConnectWifi { ssid: String, credential: WifiCredential },
+    SetDhcp {
+        iface: String,
+    },
+    SetStaticIpv4 {
+        iface: String,
+        cfg: StaticIpv4,
+    },
+    ConnectWifi {
+        ssid: String,
+        credential: WifiCredential,
+    },
 }
 
 /// Server reply bodies, keyed by the request Op. One variant per Op.
@@ -71,7 +81,9 @@ mod tests {
     fn request_roundtrip() {
         let r = Request {
             request_id: 42,
-            op: Op::SetDhcp { iface: "wlan0".into() },
+            op: Op::SetDhcp {
+                iface: "wlan0".into(),
+            },
         };
         let mut bytes = Vec::new();
         ciborium::into_writer(&r, &mut bytes).unwrap();

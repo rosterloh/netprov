@@ -1,8 +1,8 @@
 use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
 use crate::session::Session;
-use netprov_protocol::{read_message, write_message, TransportError};
 use netprov_protocol::*;
+use netprov_protocol::{read_message, write_message, TransportError};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, ToSocketAddrs};
@@ -101,10 +101,15 @@ where
         tokio::spawn(async move {
             if let Err(e) = run_server(
                 sock,
-                ServerConfig { psk, peer_id: peer_id.clone() },
+                ServerConfig {
+                    psk,
+                    peer_id: peer_id.clone(),
+                },
                 facade,
                 rl,
-            ).await {
+            )
+            .await
+            {
                 warn!(peer = %peer_id, error = ?e, "session ended with error");
             }
         });

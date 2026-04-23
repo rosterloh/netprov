@@ -42,18 +42,24 @@ impl MockFacade {
             },
         ];
         let mut ip_configs = HashMap::new();
-        ip_configs.insert("eth0".into(), IpConfig {
-            method: Ipv4Method::Auto,
-            addresses: vec!["192.168.1.50/24".parse().unwrap()],
-            gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
-            dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
-        });
-        ip_configs.insert("wlan0".into(), IpConfig {
-            method: Ipv4Method::Auto,
-            addresses: vec![],
-            gateway: None,
-            dns: vec![],
-        });
+        ip_configs.insert(
+            "eth0".into(),
+            IpConfig {
+                method: Ipv4Method::Auto,
+                addresses: vec!["192.168.1.50/24".parse().unwrap()],
+                gateway: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                dns: vec![Ipv4Addr::new(1, 1, 1, 1)],
+            },
+        );
+        ip_configs.insert(
+            "wlan0".into(),
+            IpConfig {
+                method: Ipv4Method::Auto,
+                addresses: vec![],
+                gateway: None,
+                dns: vec![],
+            },
+        );
 
         Self {
             inner: Mutex::new(MockState {
@@ -92,33 +98,47 @@ fn take_injected(s: &mut MockState) -> Option<NetError> {
 impl NetworkFacade for MockFacade {
     async fn list_interfaces(&self) -> Result<Vec<Interface>, NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
         Ok(s.interfaces.clone())
     }
 
     async fn get_ip_config(&self, iface: &str) -> Result<IpConfig, NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
-        s.ip_configs.get(iface).cloned()
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
+        s.ip_configs
+            .get(iface)
+            .cloned()
             .ok_or_else(|| NetError::InterfaceNotFound(iface.to_string()))
     }
 
     async fn wifi_status(&self) -> Result<WifiStatus, NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
         Ok(s.wifi_status.clone())
     }
 
     async fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
         Ok(s.scan.clone())
     }
 
     async fn set_dhcp(&self, iface: &str) -> Result<(), NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
-        let cfg = s.ip_configs.get_mut(iface)
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
+        let cfg = s
+            .ip_configs
+            .get_mut(iface)
             .ok_or_else(|| NetError::InterfaceNotFound(iface.to_string()))?;
         cfg.method = Ipv4Method::Auto;
         cfg.addresses.clear();
@@ -129,8 +149,12 @@ impl NetworkFacade for MockFacade {
 
     async fn set_static_ipv4(&self, iface: &str, new: StaticIpv4) -> Result<(), NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
-        let cfg = s.ip_configs.get_mut(iface)
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
+        let cfg = s
+            .ip_configs
+            .get_mut(iface)
             .ok_or_else(|| NetError::InterfaceNotFound(iface.to_string()))?;
         cfg.method = Ipv4Method::Manual;
         cfg.addresses = vec![new.address];
@@ -141,7 +165,9 @@ impl NetworkFacade for MockFacade {
 
     async fn connect_wifi(&self, ssid: &str, _cred: WifiCredential) -> Result<(), NetError> {
         let mut s = self.inner.lock().unwrap();
-        if let Some(e) = take_injected(&mut s) { return Err(e); }
+        if let Some(e) = take_injected(&mut s) {
+            return Err(e);
+        }
         s.wifi_status = WifiStatus {
             ssid: Some(ssid.to_string()),
             signal: Some(70),

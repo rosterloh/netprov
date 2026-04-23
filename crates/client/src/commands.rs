@@ -11,7 +11,8 @@ pub async fn dispatch<IO: AsyncRead + AsyncWrite>(c: &mut Client<IO>, cmd: Comma
             match res {
                 OpResult::Interfaces(ifs) => {
                     for i in ifs {
-                        println!("{:<10} {:<10} {:<18} {:?}",
+                        println!(
+                            "{:<10} {:<10} {:<18} {:?}",
                             i.name,
                             format!("{:?}", i.iface_type),
                             i.mac.unwrap_or_else(|| "-".into()),
@@ -23,14 +24,24 @@ pub async fn dispatch<IO: AsyncRead + AsyncWrite>(c: &mut Client<IO>, cmd: Comma
             }
         }
         Command::Ip { iface } => {
-            let res = c.request(Op::GetIpConfig { iface: iface.clone() }).await?;
+            let res = c
+                .request(Op::GetIpConfig {
+                    iface: iface.clone(),
+                })
+                .await?;
             match res {
                 OpResult::IpConfig(cfg) => {
                     println!("iface: {iface}");
                     println!("method: {:?}", cfg.method);
-                    for a in &cfg.addresses { println!("  addr: {a}"); }
-                    if let Some(gw) = cfg.gateway { println!("  gw:   {gw}"); }
-                    for d in &cfg.dns { println!("  dns:  {d}"); }
+                    for a in &cfg.addresses {
+                        println!("  addr: {a}");
+                    }
+                    if let Some(gw) = cfg.gateway {
+                        println!("  gw:   {gw}");
+                    }
+                    for d in &cfg.dns {
+                        println!("  dns:  {d}");
+                    }
                 }
                 _ => bail!("unexpected result shape"),
             }
@@ -47,7 +58,8 @@ pub async fn dispatch<IO: AsyncRead + AsyncWrite>(c: &mut Client<IO>, cmd: Comma
             match res {
                 OpResult::WifiNetworks(nets) => {
                     for n in nets {
-                        println!("{:<32} {:>3}% {:?} {}",
+                        println!(
+                            "{:<32} {:>3}% {:?} {}",
                             n.ssid,
                             n.signal.unwrap_or(0),
                             n.security,
@@ -58,7 +70,11 @@ pub async fn dispatch<IO: AsyncRead + AsyncWrite>(c: &mut Client<IO>, cmd: Comma
                 _ => bail!("unexpected result shape"),
             }
         }
-        Command::WifiConnect { ssid, psk, security } => {
+        Command::WifiConnect {
+            ssid,
+            psk,
+            security,
+        } => {
             let credential = match (security.as_str(), psk) {
                 ("open", _) => WifiCredential::Open,
                 ("wpa2", Some(p)) => WifiCredential::Wpa2Psk(p),
@@ -72,11 +88,21 @@ pub async fn dispatch<IO: AsyncRead + AsyncWrite>(c: &mut Client<IO>, cmd: Comma
             c.request(Op::SetDhcp { iface }).await?;
             println!("ok");
         }
-        Command::SetStatic { iface, address, gateway, dns } => {
+        Command::SetStatic {
+            iface,
+            address,
+            gateway,
+            dns,
+        } => {
             c.request(Op::SetStaticIpv4 {
                 iface,
-                cfg: StaticIpv4 { address, gateway, dns },
-            }).await?;
+                cfg: StaticIpv4 {
+                    address,
+                    gateway,
+                    dns,
+                },
+            })
+            .await?;
             println!("ok");
         }
     }

@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 pub const DEV_KEY: &[u8] = include_bytes!("../../../packaging/dev-key.bin");
 
 const _: () = {
-    assert!(DEV_KEY.len() == PSK_LEN, "dev-key.bin must be exactly PSK_LEN bytes");
+    assert!(
+        DEV_KEY.len() == PSK_LEN,
+        "dev-key.bin must be exactly PSK_LEN bytes"
+    );
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,11 +21,19 @@ pub enum KeySource {
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
     #[error("key path {path} not readable: {source}")]
-    NotReadable { path: PathBuf, #[source] source: std::io::Error },
+    NotReadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("key at {path} has insecure permissions (mode {mode:#o}); must be owner-only")]
     InsecurePermissions { path: PathBuf, mode: u32 },
     #[error("key at {path} has wrong length {got}, expected {expected}")]
-    WrongLength { path: PathBuf, got: usize, expected: usize },
+    WrongLength {
+        path: PathBuf,
+        got: usize,
+        expected: usize,
+    },
     #[error("production mode enabled but no key found")]
     NoKeyInProduction,
 }
@@ -47,14 +58,20 @@ pub fn load_key(opts: LoadOptions) -> Result<LoadedKey, KeyError> {
         });
     }
     match read_key_file(&opts.default_path) {
-        Ok(psk) => Ok(LoadedKey { psk, source: KeySource::DefaultPath(opts.default_path.clone()) }),
+        Ok(psk) => Ok(LoadedKey {
+            psk,
+            source: KeySource::DefaultPath(opts.default_path.clone()),
+        }),
         Err(KeyError::NotReadable { .. }) => {
             if opts.production {
                 return Err(KeyError::NoKeyInProduction);
             }
             let mut psk = [0u8; PSK_LEN];
             psk.copy_from_slice(DEV_KEY);
-            Ok(LoadedKey { psk, source: KeySource::EmbeddedDev })
+            Ok(LoadedKey {
+                psk,
+                source: KeySource::EmbeddedDev,
+            })
         }
         Err(e) => Err(e),
     }
@@ -108,7 +125,8 @@ mod tests {
             env_path: None,
             default_path: "/definitely/does/not/exist".into(),
             production: false,
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(loaded.source, KeySource::EmbeddedDev);
         assert_eq!(loaded.psk.as_slice(), DEV_KEY);
     }
@@ -119,7 +137,8 @@ mod tests {
             env_path: None,
             default_path: "/definitely/does/not/exist".into(),
             production: true,
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(matches!(e, KeyError::NoKeyInProduction));
     }
 
@@ -130,7 +149,8 @@ mod tests {
             env_path: None,
             default_path: f.path().to_path_buf(),
             production: false,
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(matches!(e, KeyError::InsecurePermissions { .. }));
     }
 
@@ -141,7 +161,8 @@ mod tests {
             env_path: None,
             default_path: f.path().to_path_buf(),
             production: false,
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(matches!(e, KeyError::WrongLength { .. }));
     }
 
@@ -153,7 +174,8 @@ mod tests {
             env_path: None,
             default_path: f.path().to_path_buf(),
             production: false,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(matches!(loaded.source, KeySource::DefaultPath(_)));
         assert_eq!(loaded.psk, bytes);
     }
@@ -167,7 +189,8 @@ mod tests {
             env_path: Some(f_env.path().to_path_buf()),
             default_path: f_default.path().to_path_buf(),
             production: false,
-        }).unwrap();
+        })
+        .unwrap();
         assert!(matches!(loaded.source, KeySource::EnvPath(_)));
         assert_eq!(loaded.psk, bytes);
     }

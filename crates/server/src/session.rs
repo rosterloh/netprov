@@ -34,7 +34,9 @@ impl<F: NetworkFacade> Session<F> {
             peer_id,
             facade,
             rate_limiter,
-            state: SessionAuthState::Unauthenticated { pending_nonce: None },
+            state: SessionAuthState::Unauthenticated {
+                pending_nonce: None,
+            },
         }
     }
 
@@ -52,14 +54,21 @@ impl<F: NetworkFacade> Session<F> {
     /// Called when peer writes `AuthResponse`. Consumes the nonce regardless of
     /// outcome. Returns `true` if auth succeeded.
     pub fn submit_auth(&mut self, tag: &[u8]) -> bool {
-        if matches!(self.rate_limiter.check(&self.peer_id), CheckResult::Locked { .. }) {
+        if matches!(
+            self.rate_limiter.check(&self.peer_id),
+            CheckResult::Locked { .. }
+        ) {
             return false;
         }
         let (tag_len_ok, nonce) = match &self.state {
-            SessionAuthState::Unauthenticated { pending_nonce: Some(n) } => (true, *n),
+            SessionAuthState::Unauthenticated {
+                pending_nonce: Some(n),
+            } => (true, *n),
             _ => (false, [0u8; NONCE_LEN]),
         };
-        self.state = SessionAuthState::Unauthenticated { pending_nonce: None };
+        self.state = SessionAuthState::Unauthenticated {
+            pending_nonce: None,
+        };
         if !tag_len_ok {
             return false;
         }
@@ -88,26 +97,53 @@ impl<F: NetworkFacade> Session<F> {
         }
         let request_id = req.request_id;
         let result = match req.op {
-            Op::ListInterfaces => self.facade.list_interfaces().await
-                .map(OpResult::Interfaces).map_err(Into::into),
-            Op::GetIpConfig { iface } => self.facade.get_ip_config(&iface).await
-                .map(OpResult::IpConfig).map_err(Into::into),
-            Op::WifiStatus => self.facade.wifi_status().await
-                .map(OpResult::WifiStatus).map_err(Into::into),
-            Op::WifiScan => self.facade.scan_wifi().await
-                .map(OpResult::WifiNetworks).map_err(Into::into),
-            Op::SetDhcp { iface } => self.facade.set_dhcp(&iface).await
-                .map(|_| OpResult::Ok).map_err(Into::into),
+            Op::ListInterfaces => self
+                .facade
+                .list_interfaces()
+                .await
+                .map(OpResult::Interfaces)
+                .map_err(Into::into),
+            Op::GetIpConfig { iface } => self
+                .facade
+                .get_ip_config(&iface)
+                .await
+                .map(OpResult::IpConfig)
+                .map_err(Into::into),
+            Op::WifiStatus => self
+                .facade
+                .wifi_status()
+                .await
+                .map(OpResult::WifiStatus)
+                .map_err(Into::into),
+            Op::WifiScan => self
+                .facade
+                .scan_wifi()
+                .await
+                .map(OpResult::WifiNetworks)
+                .map_err(Into::into),
+            Op::SetDhcp { iface } => self
+                .facade
+                .set_dhcp(&iface)
+                .await
+                .map(|_| OpResult::Ok)
+                .map_err(Into::into),
             Op::SetStaticIpv4 { iface, cfg } => {
                 if let Err(e) = validate_static_ipv4(&cfg) {
                     Err(e.into())
                 } else {
-                    self.facade.set_static_ipv4(&iface, cfg).await
-                        .map(|_| OpResult::Ok).map_err(Into::into)
+                    self.facade
+                        .set_static_ipv4(&iface, cfg)
+                        .await
+                        .map(|_| OpResult::Ok)
+                        .map_err(Into::into)
                 }
             }
-            Op::ConnectWifi { ssid, credential } => self.facade.connect_wifi(&ssid, credential).await
-                .map(|_| OpResult::Ok).map_err(Into::into),
+            Op::ConnectWifi { ssid, credential } => self
+                .facade
+                .connect_wifi(&ssid, credential)
+                .await
+                .map(|_| OpResult::Ok)
+                .map_err(Into::into),
         };
         Response { request_id, result }
     }
@@ -132,7 +168,10 @@ mod tests {
     #[tokio::test]
     async fn unauth_rejects_request() {
         let (_psk, s) = fixture();
-        let r = Request { request_id: 1, op: Op::ListInterfaces };
+        let r = Request {
+            request_id: 1,
+            op: Op::ListInterfaces,
+        };
         let resp = s.handle_request(r).await;
         assert!(matches!(resp.result, Err(ProtocolError::NotAuthenticated)));
     }
@@ -143,7 +182,12 @@ mod tests {
         let nonce = s.issue_nonce();
         let tag = hmac_compute(&psk, &nonce);
         assert!(s.submit_auth(&tag));
-        let resp = s.handle_request(Request { request_id: 1, op: Op::ListInterfaces }).await;
+        let resp = s
+            .handle_request(Request {
+                request_id: 1,
+                op: Op::ListInterfaces,
+            })
+            .await;
         assert!(matches!(resp.result, Ok(OpResult::Interfaces(_))));
     }
 
@@ -177,10 +221,18 @@ mod tests {
             gateway: None,
             dns: vec![],
         };
-        let resp = s.handle_request(Request {
-            request_id: 2,
-            op: Op::SetStaticIpv4 { iface: "eth0".into(), cfg: bad },
-        }).await;
-        assert!(matches!(resp.result, Err(ProtocolError::InvalidArgument { .. })));
+        let resp = s
+            .handle_request(Request {
+                request_id: 2,
+                op: Op::SetStaticIpv4 {
+                    iface: "eth0".into(),
+                    cfg: bad,
+                },
+            })
+            .await;
+        assert!(matches!(
+            resp.result,
+            Err(ProtocolError::InvalidArgument { .. })
+        ));
     }
 }

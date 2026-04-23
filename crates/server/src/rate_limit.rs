@@ -27,7 +27,9 @@ pub trait Clock: Send + Sync {
 
 pub struct SystemClock;
 impl Clock for SystemClock {
-    fn now(&self) -> Instant { Instant::now() }
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 pub struct RateLimiter<C: Clock = SystemClock> {
@@ -54,7 +56,11 @@ impl RateLimiter<SystemClock> {
 
 impl<C: Clock> RateLimiter<C> {
     pub fn new(cfg: RateLimiterConfig, clock: C) -> Self {
-        Self { cfg, clock, state: Default::default() }
+        Self {
+            cfg,
+            clock,
+            state: Default::default(),
+        }
     }
 
     pub fn check(&self, peer: &str) -> CheckResult {
@@ -66,7 +72,9 @@ impl<C: Clock> RateLimiter<C> {
         });
         if let Some(until) = e.locked_until {
             if now < until {
-                return CheckResult::Locked { retry_after: until - now };
+                return CheckResult::Locked {
+                    retry_after: until - now,
+                };
             }
             e.locked_until = None;
             e.failures.clear();
@@ -105,11 +113,27 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    struct FakeClock { t: Cell<Instant> }
-    impl FakeClock { fn new() -> Self { Self { t: Cell::new(Instant::now()) } } }
-    impl FakeClock { fn advance(&self, d: Duration) { self.t.set(self.t.get() + d); } }
+    struct FakeClock {
+        t: Cell<Instant>,
+    }
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                t: Cell::new(Instant::now()),
+            }
+        }
+    }
+    impl FakeClock {
+        fn advance(&self, d: Duration) {
+            self.t.set(self.t.get() + d);
+        }
+    }
     unsafe impl Sync for FakeClock {} // FakeClock used single-threaded in tests
-    impl Clock for FakeClock { fn now(&self) -> Instant { self.t.get() } }
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            self.t.get()
+        }
+    }
 
     #[test]
     fn allows_under_threshold() {
@@ -124,7 +148,9 @@ mod tests {
     fn locks_on_threshold() {
         let clock = FakeClock::new();
         let r = RateLimiter::new(RateLimiterConfig::default(), clock);
-        for i in 0..4 { assert!(!r.record_failure("A"), "fail {i}"); }
+        for i in 0..4 {
+            assert!(!r.record_failure("A"), "fail {i}");
+        }
         assert!(r.record_failure("A")); // 5th failure triggers lockout
         assert!(matches!(r.check("A"), CheckResult::Locked { .. }));
     }
@@ -135,14 +161,20 @@ mod tests {
         r.record_failure("A");
         r.record_failure("A");
         r.record_success("A");
-        for _ in 0..4 { assert!(!r.record_failure("A")); }
+        for _ in 0..4 {
+            assert!(!r.record_failure("A"));
+        }
     }
 
     #[test]
     fn failures_expire_after_window() {
         let clock = FakeClock::new();
         let r = RateLimiter::new(
-            RateLimiterConfig { threshold: 3, window: Duration::from_secs(10), lockout: Duration::from_secs(60) },
+            RateLimiterConfig {
+                threshold: 3,
+                window: Duration::from_secs(10),
+                lockout: Duration::from_secs(60),
+            },
             clock,
         );
         r.record_failure("A");
@@ -156,7 +188,11 @@ mod tests {
     fn lockout_clears_after_expiry() {
         let clock = FakeClock::new();
         let r = RateLimiter::new(
-            RateLimiterConfig { threshold: 2, window: Duration::from_secs(60), lockout: Duration::from_secs(30) },
+            RateLimiterConfig {
+                threshold: 2,
+                window: Duration::from_secs(60),
+                lockout: Duration::from_secs(30),
+            },
             clock,
         );
         r.record_failure("A");

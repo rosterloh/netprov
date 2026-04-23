@@ -17,7 +17,8 @@ async fn main() -> Result<()> {
     let mut psk = [0u8; PSK_LEN];
     psk.copy_from_slice(&key_bytes);
 
-    let sock = tokio::net::TcpStream::connect(&cli.endpoint).await
+    let sock = tokio::net::TcpStream::connect(&cli.endpoint)
+        .await
         .with_context(|| format!("connect {}", cli.endpoint))?;
     let mut client = Client::new(sock, psk);
     client.authenticate().await.context("authenticate")?;

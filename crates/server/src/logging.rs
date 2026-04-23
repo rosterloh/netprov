@@ -11,7 +11,9 @@ pub fn log_startup_banner(source: &KeySource) {
     match source {
         KeySource::EnvPath(p) => info!(path = %p.display(), "PSK loaded from NETPROV_KEY_PATH"),
         KeySource::DefaultPath(p) => info!(path = %p.display(), "PSK loaded from default path"),
-        KeySource::EmbeddedDev => warn!("PSK loaded from EMBEDDED DEV KEY — this server is INSECURE"),
+        KeySource::EmbeddedDev => {
+            warn!("PSK loaded from EMBEDDED DEV KEY — this server is INSECURE")
+        }
     }
 }
 

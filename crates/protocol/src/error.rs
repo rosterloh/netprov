@@ -24,13 +24,17 @@ impl BoundedString {
         let mut s = s.into();
         if s.len() > BOUNDED_STRING_MAX {
             let mut cut = BOUNDED_STRING_MAX;
-            while !s.is_char_boundary(cut) { cut -= 1; }
+            while !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
             s.truncate(cut);
         }
         Self(s)
     }
 
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Serialize for BoundedString {
@@ -44,7 +48,8 @@ impl<'de> Deserialize<'de> for BoundedString {
         let s = String::deserialize(d)?;
         if s.len() > BOUNDED_STRING_MAX {
             return Err(serde::de::Error::custom(format!(
-                "string exceeds {BOUNDED_STRING_MAX} byte limit ({} bytes)", s.len()
+                "string exceeds {BOUNDED_STRING_MAX} byte limit ({} bytes)",
+                s.len()
             )));
         }
         Ok(Self(s))
@@ -146,7 +151,9 @@ mod tests {
 
     #[test]
     fn protocol_error_roundtrip() {
-        let e = ProtocolError::RateLimited { retry_after_seconds: 60 };
+        let e = ProtocolError::RateLimited {
+            retry_after_seconds: 60,
+        };
         let mut bytes = Vec::new();
         ciborium::into_writer(&e, &mut bytes).unwrap();
         let back: ProtocolError = ciborium::from_reader(&bytes[..]).unwrap();

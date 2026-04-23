@@ -7,7 +7,12 @@ use std::path::PathBuf;
 #[command(name = "netprov", about = "netprov client CLI")]
 pub struct Cli {
     /// Path to the 32-byte PSK file.
-    #[arg(long, short = 'k', env = "NETPROV_KEY_PATH", default_value = "/etc/netprov/key")]
+    #[arg(
+        long,
+        short = 'k',
+        env = "NETPROV_KEY_PATH",
+        default_value = "/etc/netprov/key"
+    )]
     pub key_path: PathBuf,
 
     /// TCP endpoint for loopback transport (Part 1). Part 2 will default to

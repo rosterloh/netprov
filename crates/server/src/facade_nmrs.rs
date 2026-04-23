@@ -42,35 +42,43 @@ async fn find_device_path(
         "org.freedesktop.NetworkManager",
         "/org/freedesktop/NetworkManager",
         "org.freedesktop.NetworkManager",
-    ).await.map_err(nm_err)?;
+    )
+    .await
+    .map_err(nm_err)?;
     let path: zbus::zvariant::OwnedObjectPath =
-        proxy.call("GetDeviceByIpIface", &(iface,)).await
+        proxy
+            .call("GetDeviceByIpIface", &(iface,))
+            .await
             .map_err(|_| NetError::InterfaceNotFound(iface.to_string()))?;
     Ok(path)
 }
 
-async fn read_method(
-    conn: &zbus::Connection,
-    dev: &zbus::Proxy<'_>,
-) -> Option<Ipv4Method> {
-    let active: zbus::zvariant::OwnedObjectPath = dev.get_property("ActiveConnection").await.ok()?;
-    if active.as_str() == "/" { return None; }
+async fn read_method(conn: &zbus::Connection, dev: &zbus::Proxy<'_>) -> Option<Ipv4Method> {
+    let active: zbus::zvariant::OwnedObjectPath =
+        dev.get_property("ActiveConnection").await.ok()?;
+    if active.as_str() == "/" {
+        return None;
+    }
     let ac = zbus::Proxy::new(
         conn,
         "org.freedesktop.NetworkManager",
         active.as_str(),
         "org.freedesktop.NetworkManager.Connection.Active",
-    ).await.ok()?;
+    )
+    .await
+    .ok()?;
     let conn_path: zbus::zvariant::OwnedObjectPath = ac.get_property("Connection").await.ok()?;
     let settings = zbus::Proxy::new(
         conn,
         "org.freedesktop.NetworkManager",
         conn_path.as_str(),
         "org.freedesktop.NetworkManager.Settings.Connection",
-    ).await.ok()?;
+    )
+    .await
+    .ok()?;
     let s: std::collections::HashMap<
         String,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
     > = settings.call("GetSettings", &()).await.ok()?;
     let m_val = s.get("ipv4")?.get("method")?;
     let m: String = TryInto::try_into(m_val.try_clone().ok()?).ok()?;
@@ -90,7 +98,9 @@ impl NetworkFacade for NmrsFacade {
                 "org.freedesktop.NetworkManager",
                 "/org/freedesktop/NetworkManager",
                 "org.freedesktop.NetworkManager",
-            ).await.map_err(nm_err)?;
+            )
+            .await
+            .map_err(nm_err)?;
             let devices: Vec<zbus::zvariant::OwnedObjectPath> =
                 proxy.call("GetDevices", &()).await.map_err(nm_err)?;
             let mut out = Vec::with_capacity(devices.len());
@@ -100,23 +110,25 @@ impl NetworkFacade for NmrsFacade {
                     "org.freedesktop.NetworkManager",
                     dev_path.as_str(),
                     "org.freedesktop.NetworkManager.Device",
-                ).await.map_err(nm_err)?;
+                )
+                .await
+                .map_err(nm_err)?;
                 let name: String = dev.get_property("Interface").await.map_err(nm_err)?;
                 let dev_type: u32 = dev.get_property("DeviceType").await.map_err(nm_err)?;
                 let mac: Option<String> = dev.get_property("HwAddress").await.ok();
                 let state: u32 = dev.get_property("State").await.map_err(nm_err)?;
 
                 let iface_type = match dev_type {
-                    1 => IfaceType::Ethernet,   // NM_DEVICE_TYPE_ETHERNET
-                    2 => IfaceType::Wifi,       // NM_DEVICE_TYPE_WIFI
-                    14 => IfaceType::Loopback,  // NM_DEVICE_TYPE_LOOPBACK
+                    1 => IfaceType::Ethernet,  // NM_DEVICE_TYPE_ETHERNET
+                    2 => IfaceType::Wifi,      // NM_DEVICE_TYPE_WIFI
+                    14 => IfaceType::Loopback, // NM_DEVICE_TYPE_LOOPBACK
                     _ => IfaceType::Other,
                 };
                 if matches!(iface_type, IfaceType::Loopback) {
                     continue;
                 }
                 let iface_state = match state {
-                    100 => IfaceState::Up,     // activated
+                    100 => IfaceState::Up, // activated
                     20..=30 => IfaceState::Down,
                     _ => IfaceState::Unknown,
                 };
@@ -128,7 +140,9 @@ impl NetworkFacade for NmrsFacade {
                 });
             }
             Ok::<_, NetError>(out)
-        }).await.map_err(|_| NetError::Timeout)?
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
     async fn get_ip_config(&self, iface: &str) -> Result<IpConfig, NetError> {
@@ -140,48 +154,71 @@ impl NetworkFacade for NmrsFacade {
                 "org.freedesktop.NetworkManager",
                 dev_path.as_str(),
                 "org.freedesktop.NetworkManager.Device",
-            ).await.map_err(nm_err)?;
+            )
+            .await
+            .map_err(nm_err)?;
 
             let ip4_path: zbus::zvariant::OwnedObjectPath =
                 dev.get_property("Ip4Config").await.map_err(nm_err)?;
 
-            let method = read_method(&self.zbus, &dev).await.unwrap_or(Ipv4Method::Auto);
+            let method = read_method(&self.zbus, &dev)
+                .await
+                .unwrap_or(Ipv4Method::Auto);
 
             if ip4_path.as_str() == "/" {
-                return Ok(IpConfig { method, addresses: vec![], gateway: None, dns: vec![] });
+                return Ok(IpConfig {
+                    method,
+                    addresses: vec![],
+                    gateway: None,
+                    dns: vec![],
+                });
             }
             let ip4 = zbus::Proxy::new(
                 &self.zbus,
                 "org.freedesktop.NetworkManager",
                 ip4_path.as_str(),
                 "org.freedesktop.NetworkManager.IP4Config",
-            ).await.map_err(nm_err)?;
+            )
+            .await
+            .map_err(nm_err)?;
 
             let addr_data: Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> =
                 ip4.get_property("AddressData").await.map_err(nm_err)?;
             let mut addresses = Vec::new();
             for m in addr_data {
-                let addr: String = m.get("address")
+                let addr: String = m
+                    .get("address")
                     .and_then(|v| v.try_clone().ok())
                     .and_then(|v| TryInto::try_into(v).ok())
                     .unwrap_or_default();
-                let prefix: u32 = m.get("prefix")
+                let prefix: u32 = m
+                    .get("prefix")
                     .and_then(|v| v.try_clone().ok())
                     .and_then(|v| TryInto::try_into(v).ok())
                     .unwrap_or(32);
-                if let Ok(a) = format!("{addr}/{prefix}").parse() { addresses.push(a); }
+                if let Ok(a) = format!("{addr}/{prefix}").parse() {
+                    addresses.push(a);
+                }
             }
 
             let gw: String = ip4.get_property("Gateway").await.unwrap_or_default();
             let gateway = gw.parse().ok();
 
             let nameservers: Vec<u32> = ip4.get_property("Nameservers").await.unwrap_or_default();
-            let dns = nameservers.into_iter()
+            let dns = nameservers
+                .into_iter()
                 .map(|n| std::net::Ipv4Addr::from(n.to_le_bytes()))
                 .collect();
 
-            Ok::<_, NetError>(IpConfig { method, addresses, gateway, dns })
-        }).await.map_err(|_| NetError::Timeout)?
+            Ok::<_, NetError>(IpConfig {
+                method,
+                addresses,
+                gateway,
+                dns,
+            })
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
     async fn wifi_status(&self) -> Result<WifiStatus, NetError> {
@@ -222,8 +259,11 @@ mod live_tests {
     async fn list_interfaces_live() {
         let f = NmrsFacade::new().await.expect("connect NM");
         let ifs = f.list_interfaces().await.expect("list");
-        assert!(ifs.iter().any(|i| matches!(i.iface_type, IfaceType::Ethernet | IfaceType::Wifi)),
-            "expected at least one Ethernet or Wi-Fi interface, got {ifs:?}");
+        assert!(
+            ifs.iter()
+                .any(|i| matches!(i.iface_type, IfaceType::Ethernet | IfaceType::Wifi)),
+            "expected at least one Ethernet or Wi-Fi interface, got {ifs:?}"
+        );
     }
 
     #[tokio::test]

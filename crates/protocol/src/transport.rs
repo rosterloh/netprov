@@ -26,9 +26,7 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-pub async fn read_message<R: AsyncReadExt + Unpin>(
-    r: &mut R,
-) -> Result<Vec<u8>, TransportError> {
+pub async fn read_message<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>, TransportError> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;

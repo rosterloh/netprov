@@ -29,10 +29,18 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
     ciborium::from_reader(bytes).map_err(|e| CodecError::Decode(e.to_string()))
 }
 
-pub fn encode_request(req: &Request) -> Result<Vec<u8>, CodecError> { encode(req) }
-pub fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> { decode(bytes) }
-pub fn encode_response(resp: &Response) -> Result<Vec<u8>, CodecError> { encode(resp) }
-pub fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> { decode(bytes) }
+pub fn encode_request(req: &Request) -> Result<Vec<u8>, CodecError> {
+    encode(req)
+}
+pub fn decode_request(bytes: &[u8]) -> Result<Request, CodecError> {
+    decode(bytes)
+}
+pub fn encode_response(resp: &Response) -> Result<Vec<u8>, CodecError> {
+    encode(resp)
+}
+pub fn decode_response(bytes: &[u8]) -> Result<Response, CodecError> {
+    decode(bytes)
+}
 
 #[cfg(test)]
 mod tests {

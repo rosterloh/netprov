@@ -67,7 +67,10 @@ mod tests {
 
     #[test]
     fn valid_config_accepted() {
-        assert!(validate_static_ipv4(&cfg("192.168.1.10/24", Some("192.168.1.1"), &["1.1.1.1"])).is_ok());
+        assert!(
+            validate_static_ipv4(&cfg("192.168.1.10/24", Some("192.168.1.1"), &["1.1.1.1"]))
+                .is_ok()
+        );
     }
 
     #[test]

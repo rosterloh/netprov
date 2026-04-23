@@ -16,14 +16,14 @@ pub enum FramingError {
     #[error("duplicate sequence number {seq} for request {request_id}")]
     DuplicateSeq { request_id: u16, seq: u16 },
     #[error("missing fragments for request {request_id} (have {got}, FIN at seq {fin_seq})")]
-    MissingFragments { request_id: u16, got: usize, fin_seq: u16 },
+    MissingFragments {
+        request_id: u16,
+        got: usize,
+        fin_seq: u16,
+    },
 }
 
-pub fn fragment(
-    request_id: u16,
-    payload: &[u8],
-    max_fragment: usize,
-) -> Vec<Vec<u8>> {
+pub fn fragment(request_id: u16, payload: &[u8], max_fragment: usize) -> Vec<Vec<u8>> {
     let body = max_fragment.saturating_sub(FRAME_HEADER_LEN).max(1);
     if payload.is_empty() {
         return vec![encode_frame(request_id, 0, FRAME_FLAG_FIN, &[])];
@@ -81,17 +81,23 @@ pub fn parse_frame(bytes: &[u8]) -> Result<ParsedFrame<'_>, FramingError> {
 
 impl Reassembler {
     pub fn new(max_message: usize) -> Self {
-        Self { max_message, state: Default::default() }
+        Self {
+            max_message,
+            state: Default::default(),
+        }
     }
 
     /// Feed one parsed fragment. Returns `Some(message_bytes)` when a FIN is
     /// received and all prior seqs are present.
     pub fn push(&mut self, f: ParsedFrame<'_>) -> Result<Option<Vec<u8>>, FramingError> {
-        let entry = self.state.entry(f.request_id).or_insert_with(|| PartialMessage {
-            frags: Default::default(),
-            fin_seq: None,
-            total_bytes: 0,
-        });
+        let entry = self
+            .state
+            .entry(f.request_id)
+            .or_insert_with(|| PartialMessage {
+                frags: Default::default(),
+                fin_seq: None,
+                total_bytes: 0,
+            });
 
         if entry.frags.contains_key(&f.seq) {
             return Err(FramingError::DuplicateSeq {
@@ -102,7 +108,9 @@ impl Reassembler {
         entry.total_bytes += f.payload.len();
         if entry.total_bytes > self.max_message {
             self.state.remove(&f.request_id);
-            return Err(FramingError::MessageTooLarge { limit: self.max_message });
+            return Err(FramingError::MessageTooLarge {
+                limit: self.max_message,
+            });
         }
         entry.frags.insert(f.seq, f.payload.to_vec());
         if f.fin {
@@ -157,7 +165,10 @@ mod tests {
 
     #[test]
     fn too_short_frame_rejected() {
-        assert!(matches!(parse_frame(b"abc"), Err(FramingError::TooShort(3))));
+        assert!(matches!(
+            parse_frame(b"abc"),
+            Err(FramingError::TooShort(3))
+        ));
     }
 
     #[test]

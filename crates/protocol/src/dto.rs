@@ -3,10 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IfaceType { Ethernet, Wifi, Loopback, Other }
+pub enum IfaceType {
+    Ethernet,
+    Wifi,
+    Loopback,
+    Other,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IfaceState { Up, Down, Unknown }
+pub enum IfaceState {
+    Up,
+    Down,
+    Unknown,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interface {
@@ -17,7 +26,10 @@ pub struct Interface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Ipv4Method { Auto, Manual }
+pub enum Ipv4Method {
+    Auto,
+    Manual,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpConfig {
@@ -28,7 +40,13 @@ pub struct IpConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Security { Open, Wep, WpaPsk, Wpa2Psk, Wpa3 }
+pub enum Security {
+    Open,
+    Wep,
+    WpaPsk,
+    Wpa2Psk,
+    Wpa3,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiNetwork {
@@ -66,7 +84,12 @@ mod tests {
 
     #[test]
     fn iface_type_roundtrip() {
-        for t in [IfaceType::Ethernet, IfaceType::Wifi, IfaceType::Loopback, IfaceType::Other] {
+        for t in [
+            IfaceType::Ethernet,
+            IfaceType::Wifi,
+            IfaceType::Loopback,
+            IfaceType::Other,
+        ] {
             let bytes = {
                 let mut v = Vec::new();
                 ciborium::into_writer(&t, &mut v).unwrap();

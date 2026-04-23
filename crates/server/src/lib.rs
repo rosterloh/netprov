@@ -9,7 +9,7 @@ pub mod server_loop;
 pub mod session;
 pub mod validate;
 pub use facade::NetworkFacade;
-pub use key::{load_key, KeySource, LoadOptions, LoadedKey, KeyError, DEV_KEY};
+pub use key::{load_key, KeyError, KeySource, LoadOptions, LoadedKey, DEV_KEY};
 pub use keygen::{run_keygen, KeygenArgs, KeygenError};
 pub use logging::{log_startup_banner, spawn_dev_key_warn_loop};
 pub use rate_limit::{RateLimiter, RateLimiterConfig, SystemClock};

@@ -4,9 +4,9 @@ use super::uuids::{
     AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID,
 };
 use bluer::gatt::local::{
-    characteristic_control, Application, Characteristic, CharacteristicNotify,
-    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite,
-    CharacteristicWriteMethod, Service,
+    characteristic_control, Application, Characteristic, CharacteristicControl,
+    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead,
+    CharacteristicWrite, CharacteristicWriteMethod, Service,
 };
 use std::sync::Arc;
 
@@ -18,13 +18,23 @@ pub struct GattHandlers {
     pub on_request_write: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 }
 
-pub fn build_application(h: GattHandlers) -> Application {
+/// The result of `build_application`: the Application you register with
+/// BlueZ, plus the control stream you poll to receive CharacteristicWriters
+/// when a peer subscribes to notifications on REQUEST_UUID.
+pub struct BuiltApp {
+    pub app: Application,
+    pub notify_control: CharacteristicControl,
+}
+
+pub fn build_application(h: GattHandlers) -> BuiltApp {
     let info_read = h.on_info_read.clone();
     let nonce_read = h.on_nonce_read.clone();
     let auth_write = h.on_auth_write.clone();
     let request_write = h.on_request_write.clone();
 
-    Application {
+    let (notify_control, notify_handle) = characteristic_control();
+
+    let app = Application {
         services: vec![Service {
             uuid: SERVICE_UUID,
             primary: true,
@@ -90,12 +100,14 @@ pub fn build_application(h: GattHandlers) -> Application {
                         method: CharacteristicNotifyMethod::Io,
                         ..Default::default()
                     }),
-                    control_handle: characteristic_control().1,
+                    control_handle: notify_handle,
                     ..Default::default()
                 },
             ],
             ..Default::default()
         }],
         ..Default::default()
-    }
+    };
+
+    BuiltApp { app, notify_control }
 }

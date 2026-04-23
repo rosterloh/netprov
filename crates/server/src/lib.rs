@@ -1,6 +1,7 @@
 //! netprov server library.
 
 pub mod facade;
+pub mod rate_limit;
 pub mod validate;
 pub use facade::NetworkFacade;
 pub use validate::validate_static_ipv4;

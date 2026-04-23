@@ -25,7 +25,10 @@ sha2.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
 ipnet = { workspace = true, features = ["serde"] }
+bluer = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [features]
 default = []
 loopback = ["dep:netprov-server"]
+ble = ["dep:bluer", "dep:futures-util"]

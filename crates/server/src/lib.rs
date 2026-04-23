@@ -26,3 +26,6 @@ pub use facade_mock::MockFacade;
 pub mod facade_nmrs;
 #[cfg(feature = "live-nm")]
 pub use facade_nmrs::NmrsFacade;
+
+#[cfg(feature = "live-ble")]
+pub mod ble;

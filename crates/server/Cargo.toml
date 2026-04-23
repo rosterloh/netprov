@@ -14,6 +14,7 @@ path = "src/main.rs"
 default = ["mock"]
 mock = []
 live-nm = ["dep:nmrs", "dep:zbus"]
+live-ble = ["dep:bluer", "dep:futures-util", "dep:sd-notify"]
 
 [dependencies]
 netprov-protocol = { path = "../protocol" }
@@ -38,6 +39,9 @@ base64 = "0.22"
 
 nmrs = { version = "2.3", optional = true }
 zbus = { version = "5", optional = true }
+bluer = { workspace = true, optional = true }
+sd-notify = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

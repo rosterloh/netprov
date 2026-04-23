@@ -28,6 +28,9 @@ rand = "0.8"
 proptest = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 ipnet = "2"
+bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
+sd-notify = "0.5"
+futures-util = "0.3"
 
 [profile.release]
 lto = "thin"

@@ -29,7 +29,7 @@ pub async fn run_ble_server<F>(
     cfg: BleServerConfig,
     facade: Arc<F>,
     rate_limiter: Arc<RateLimiter>,
-    mut ready_cb: impl FnMut() + Send,
+    mut ready_cb: impl FnMut(),
 ) -> anyhow::Result<()>
 where
     F: NetworkFacade + 'static,
@@ -117,6 +117,12 @@ where
 
     // Drive the notify control stream: when a peer subscribes, mint a
     // PeerSession for it and pipe notify_rx bytes into the writer.
+    //
+    // Structural note: while we're blocked inside the inner recv() loop for
+    // peer A, the outer notify_control.next() is not polled. bluer buffers any
+    // Notify event for peer B in its stream. Peer B is therefore served only
+    // after peer A's loop exits — achieving serial single-peer semantics
+    // without any explicit gate.
     loop {
         let evt = match notify_control.next().await {
             Some(e) => e,
@@ -146,6 +152,11 @@ where
                         break;
                     }
                 }
+                // Drain any frames queued by this peer's dispatch tasks before
+                // a new peer connects. Without this, a slow WifiScan completing
+                // after disconnect would be delivered to the next peer (§7.5
+                // single-peer serial semantics).
+                while notify_rx.try_recv().is_ok() {}
                 *current.lock().unwrap() = None;
                 info!(peer = %peer_id, "peer session ended");
             }

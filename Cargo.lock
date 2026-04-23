@@ -884,6 +884,7 @@ dependencies = [
  "clap",
  "hmac",
  "ipnet",
+ "netprov-client",
  "netprov-protocol",
  "nmrs",
  "proptest",

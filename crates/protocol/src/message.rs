@@ -49,6 +49,20 @@ pub struct Response {
     pub result: Result<OpResult, ProtocolError>,
 }
 
+/// Loopback transport envelope. Used by Part 1's in-memory transport. Part 2
+/// replaces envelope kinds with dedicated GATT characteristics, but the
+/// Request/Response shapes remain identical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Envelope {
+    NonceRequest,
+    NonceReply(#[serde(with = "serde_bytes")] Vec<u8>),
+    AuthSubmit(#[serde(with = "serde_bytes")] Vec<u8>),
+    AuthOk,
+    AuthFail,
+    Req(Request),
+    Resp(Response),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,7 @@ pub use keygen::{run_keygen, KeygenArgs, KeygenError};
 pub use logging::{log_startup_banner, spawn_dev_key_warn_loop};
 pub use rate_limit::{RateLimiter, RateLimiterConfig, SystemClock};
 pub use server_loop::{run_server, ServerConfig, ServerError};
-pub use session::Session;
+pub use session::{dispatch, Session};
 pub use validate::validate_static_ipv4;
 
 #[cfg(feature = "mock")]

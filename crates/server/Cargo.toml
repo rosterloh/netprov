@@ -36,7 +36,7 @@ ipnet = { workspace = true, features = ["serde"] }
 qrcode = "0.14"
 base64 = "0.22"
 
-nmrs = { version = "2", optional = true }
+nmrs = { version = "2.3", optional = true }
 zbus = { version = "5", optional = true }
 
 [dev-dependencies]

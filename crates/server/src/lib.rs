@@ -21,3 +21,8 @@ pub use validate::validate_static_ipv4;
 pub mod facade_mock;
 #[cfg(feature = "mock")]
 pub use facade_mock::MockFacade;
+
+#[cfg(feature = "live-nm")]
+pub mod facade_nmrs;
+#[cfg(feature = "live-nm")]
+pub use facade_nmrs::NmrsFacade;

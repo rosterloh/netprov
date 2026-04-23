@@ -1,7 +1,7 @@
 use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
 use crate::session::Session;
-use crate::transport::{read_message, write_message, TransportError};
+use netprov_protocol::{read_message, write_message, TransportError};
 use netprov_protocol::*;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};

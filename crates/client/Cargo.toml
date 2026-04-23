@@ -23,6 +23,7 @@ clap.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 tokio-util.workspace = true
+thiserror.workspace = true
 ipnet = { workspace = true, features = ["serde"] }
 
 [features]

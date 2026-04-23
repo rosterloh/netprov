@@ -1,10 +1,8 @@
-//! Length-prefixed message transport over any AsyncRead + AsyncWrite.
-//!
-//! Wire format: `[u32 BE length][body]`. Max body size MAX_MESSAGE_SIZE
-//! (§7.2 — 4 KiB). Part 2 will replace this with GATT-fragmented framing;
-//! both transports share the same request/response semantics above.
+//! Length-prefixed transport, shared by client and server.
+//! Part 2 will add a GATT-fragmented transport; this one stays as the
+//! loopback transport for tests.
 
-use netprov_protocol::MAX_MESSAGE_SIZE;
+use crate::MAX_MESSAGE_SIZE;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, thiserror::Error)]
@@ -22,8 +20,7 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
     if body.len() > MAX_MESSAGE_SIZE {
         return Err(TransportError::TooLarge(body.len()));
     }
-    let len = body.len() as u32;
-    w.write_all(&len.to_be_bytes()).await?;
+    w.write_all(&(body.len() as u32).to_be_bytes()).await?;
     w.write_all(body).await?;
     w.flush().await?;
     Ok(())

@@ -185,4 +185,26 @@ mod tests {
         let err = r.push(parse_frame(&f0b).unwrap()).unwrap_err();
         assert!(matches!(err, FramingError::DuplicateSeq { .. }));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn fragment_reassemble_roundtrip(
+            rid in any::<u16>(),
+            payload in proptest::collection::vec(any::<u8>(), 0..2000usize),
+            mtu in 16usize..512,
+        ) {
+            let frames = fragment(rid, &payload, mtu);
+            let mut r = Reassembler::new(4096);
+            let mut out = None;
+            for f in &frames {
+                let parsed = parse_frame(f).unwrap();
+                if let Some(msg) = r.push(parsed).unwrap() {
+                    out = Some(msg);
+                }
+            }
+            prop_assert_eq!(out.unwrap(), payload);
+        }
+    }
 }

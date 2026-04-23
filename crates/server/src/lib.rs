@@ -5,11 +5,13 @@ pub mod key;
 pub mod logging;
 pub mod rate_limit;
 pub mod session;
+pub mod transport;
 pub mod validate;
 pub use facade::NetworkFacade;
 pub use key::{load_key, KeySource, LoadOptions, LoadedKey, KeyError, DEV_KEY};
 pub use logging::{log_startup_banner, spawn_dev_key_warn_loop};
 pub use session::Session;
+pub use transport::{read_message, write_message, TransportError};
 pub use validate::validate_static_ipv4;
 
 #[cfg(feature = "mock")]

@@ -29,3 +29,5 @@ pub use facade_nmrs::NmrsFacade;
 
 #[cfg(feature = "live-ble")]
 pub mod ble;
+#[cfg(feature = "live-ble")]
+pub mod notify;

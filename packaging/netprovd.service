@@ -1,0 +1,28 @@
+[Unit]
+Description=Network provisioning daemon (BLE)
+After=NetworkManager.service bluetooth.service
+Requires=NetworkManager.service bluetooth.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/netprovd serve-ble
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @obsolete @privileged @reboot @swap
+ReadWritePaths=/etc/netprov
+
+[Install]
+WantedBy=multi-user.target

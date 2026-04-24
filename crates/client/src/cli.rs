@@ -20,6 +20,11 @@ pub struct Cli {
     #[arg(long, env = "NETPROV_ENDPOINT", default_value = "127.0.0.1:9600")]
     pub endpoint: String,
 
+    /// BLE peer BD_ADDR (e.g. AA:BB:CC:DD:EE:FF). If set, uses BLE transport
+    /// and requires `--features ble`.
+    #[arg(long)]
+    pub ble_peer: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }

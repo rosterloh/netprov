@@ -49,7 +49,7 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         Cmd::Keygen { install, out } => {
@@ -91,6 +91,27 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Send structured tracing records to journald when the socket is present
+/// (systemd host), otherwise fall back to stderr. Honors `RUST_LOG`.
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    if let Ok(journald) = tracing_journald::layer() {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(journald)
+            .init();
+        return;
+    }
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 }
 
 fn load_prod_or_dev_key() -> anyhow::Result<LoadedKey> {

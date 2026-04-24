@@ -396,10 +396,72 @@ impl NetworkFacade for NmrsFacade {
         Err(NetError::NotSupported)
     }
 
-    async fn connect_wifi(&self, _ssid: &str, _cred: WifiCredential) -> Result<(), NetError> {
-        // TODO(part-2-nmrs): implement via nmrs or NM AddAndActivateConnection.
+    async fn connect_wifi(&self, ssid: &str, cred: WifiCredential) -> Result<(), NetError> {
         let _guard = self.write_guard.lock().await;
-        Err(NetError::NotSupported)
+        tokio::time::timeout(OP_TIMEOUT, async {
+            let wifi_path = find_wifi_device_path(&self.zbus)
+                .await?
+                .ok_or(NetError::NotSupported)?;
+
+            use zbus::zvariant::{OwnedValue, Value};
+
+            let (key_mgmt, psk) = match cred {
+                WifiCredential::Open => ("none", None),
+                WifiCredential::WpaPsk(p) | WifiCredential::Wpa2Psk(p) => ("wpa-psk", Some(p)),
+                WifiCredential::Wpa3(p) => ("sae", Some(p)),
+            };
+
+            let mut conn: std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, Value<'_>>,
+            > = std::collections::HashMap::new();
+
+            let mut connection = std::collections::HashMap::new();
+            connection.insert("id".to_string(), Value::from(ssid));
+            connection.insert("type".to_string(), Value::from("802-11-wireless"));
+            conn.insert("connection".to_string(), connection);
+
+            let mut wireless = std::collections::HashMap::new();
+            wireless.insert("ssid".to_string(), Value::from(ssid.as_bytes().to_vec()));
+            wireless.insert("mode".to_string(), Value::from("infrastructure"));
+            conn.insert("802-11-wireless".to_string(), wireless);
+
+            if key_mgmt != "none" {
+                let mut sec = std::collections::HashMap::new();
+                sec.insert("key-mgmt".to_string(), Value::from(key_mgmt));
+                if let Some(p) = psk {
+                    sec.insert("psk".to_string(), Value::from(p));
+                }
+                conn.insert("802-11-wireless-security".to_string(), sec);
+            }
+
+            let mut ipv4 = std::collections::HashMap::new();
+            ipv4.insert("method".to_string(), Value::from("auto"));
+            conn.insert("ipv4".to_string(), ipv4);
+
+            let nm = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                "/org/freedesktop/NetworkManager",
+                "org.freedesktop.NetworkManager",
+            )
+            .await
+            .map_err(nm_err)?;
+
+            // AddAndActivateConnection args:
+            //   connection (a{sa{sv}})     — the settings dict built above
+            //   device     (o)             — the wireless device path
+            //   specific_object (o)        — use "/" for "no preference"
+            // Returns a tuple (o, o): (new_connection_path, active_connection_path).
+            let specific: zbus::zvariant::ObjectPath = "/".try_into().map_err(nm_err)?;
+            let _: (OwnedValue, OwnedValue) = nm
+                .call("AddAndActivateConnection", &(conn, wifi_path, specific))
+                .await
+                .map_err(nm_err)?;
+            Ok::<(), NetError>(())
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 }
 

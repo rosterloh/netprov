@@ -102,6 +102,39 @@ async fn find_device_path(
     Ok(path)
 }
 
+async fn get_settings_connection_for_iface(
+    conn: &zbus::Connection,
+    iface: &str,
+) -> Result<zbus::zvariant::OwnedObjectPath, NetError> {
+    let dev_path = find_device_path(conn, iface).await?;
+    let dev = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.NetworkManager",
+        dev_path.as_str(),
+        "org.freedesktop.NetworkManager.Device",
+    )
+    .await
+    .map_err(nm_err)?;
+    let active: zbus::zvariant::OwnedObjectPath =
+        dev.get_property("ActiveConnection").await.map_err(nm_err)?;
+    if active.as_str() == "/" {
+        return Err(NetError::InvalidArgument(format!(
+            "interface {iface} has no active connection"
+        )));
+    }
+    let ac = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.NetworkManager",
+        active.as_str(),
+        "org.freedesktop.NetworkManager.Connection.Active",
+    )
+    .await
+    .map_err(nm_err)?;
+    let settings: zbus::zvariant::OwnedObjectPath =
+        ac.get_property("Connection").await.map_err(nm_err)?;
+    Ok(settings)
+}
+
 async fn read_method(conn: &zbus::Connection, dev: &zbus::Proxy<'_>) -> Option<Ipv4Method> {
     let active: zbus::zvariant::OwnedObjectPath =
         dev.get_property("ActiveConnection").await.ok()?;
@@ -384,16 +417,144 @@ impl NetworkFacade for NmrsFacade {
         .map_err(|_| NetError::Timeout)?
     }
 
-    async fn set_dhcp(&self, _iface: &str) -> Result<(), NetError> {
-        // TODO(part-2-nmrs): use Settings.Connection.Update to set ipv4.method=auto.
+    async fn set_dhcp(&self, iface: &str) -> Result<(), NetError> {
         let _guard = self.write_guard.lock().await;
-        Err(NetError::NotSupported)
+        tokio::time::timeout(OP_TIMEOUT, async {
+            let settings_path = get_settings_connection_for_iface(&self.zbus, iface).await?;
+            let settings = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                settings_path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )
+            .await
+            .map_err(nm_err)?;
+
+            use zbus::zvariant::Value;
+            let mut existing: std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+            > = settings.call("GetSettings", &()).await.map_err(nm_err)?;
+            let ipv4 = existing.entry("ipv4".into()).or_default();
+            ipv4.insert("method".into(), Value::from("auto").try_into().map_err(nm_err)?);
+            ipv4.remove("addresses");
+            ipv4.remove("address-data");
+            ipv4.remove("gateway");
+            ipv4.remove("dns");
+
+            settings
+                .call::<_, _, ()>("Update", &(existing,))
+                .await
+                .map_err(nm_err)?;
+
+            // Re-activate so the new method takes effect.
+            let dev = find_device_path(&self.zbus, iface).await?;
+            let nm = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                "/org/freedesktop/NetworkManager",
+                "org.freedesktop.NetworkManager",
+            )
+            .await
+            .map_err(nm_err)?;
+            let specific: zbus::zvariant::ObjectPath = "/".try_into().map_err(nm_err)?;
+            nm.call::<_, _, zbus::zvariant::OwnedObjectPath>(
+                "ActivateConnection",
+                &(settings_path, dev, specific),
+            )
+            .await
+            .map_err(nm_err)?;
+            Ok::<(), NetError>(())
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
-    async fn set_static_ipv4(&self, _iface: &str, _cfg: StaticIpv4) -> Result<(), NetError> {
-        // TODO(part-2-nmrs): use Settings.Connection.Update to set ipv4.method=manual + addresses.
+    async fn set_static_ipv4(&self, iface: &str, cfg: StaticIpv4) -> Result<(), NetError> {
         let _guard = self.write_guard.lock().await;
-        Err(NetError::NotSupported)
+        tokio::time::timeout(OP_TIMEOUT, async {
+            let settings_path = get_settings_connection_for_iface(&self.zbus, iface).await?;
+            let settings = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                settings_path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )
+            .await
+            .map_err(nm_err)?;
+
+            use zbus::zvariant::Value;
+            let mut existing: std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+            > = settings.call("GetSettings", &()).await.map_err(nm_err)?;
+
+            // AddressData entry: [{"address": "1.2.3.4", "prefix": 24}]
+            let mut ad = std::collections::HashMap::new();
+            ad.insert(
+                "address".to_string(),
+                Value::from(cfg.address.addr().to_string()).try_into().map_err(nm_err)?,
+            );
+            ad.insert(
+                "prefix".to_string(),
+                Value::from(cfg.address.prefix_len() as u32).try_into().map_err(nm_err)?,
+            );
+            let addr_data: Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> = vec![ad];
+
+            let ipv4 = existing.entry("ipv4".into()).or_default();
+            ipv4.insert("method".into(), Value::from("manual").try_into().map_err(nm_err)?);
+            ipv4.insert(
+                "address-data".into(),
+                Value::from(addr_data).try_into().map_err(nm_err)?,
+            );
+            if let Some(gw) = cfg.gateway {
+                ipv4.insert(
+                    "gateway".into(),
+                    Value::from(gw.to_string()).try_into().map_err(nm_err)?,
+                );
+            } else {
+                ipv4.remove("gateway");
+            }
+            // NM's legacy `dns` field: array of u32 in NETWORK byte order (big-endian host byte order
+            // interpretation on the wire, native byte order in D-Bus per NM docs — but in practice
+            // NM treats `a.b.c.d` as `((a<<24)|(b<<16)|(c<<8)|d)` written as `u32::from_be_bytes([a,b,c,d])`
+            // once ActivateConnection consumes the dict. Using little-endian flips the octets,
+            // so use big-endian here.)
+            let dns_u32: Vec<u32> = cfg
+                .dns
+                .iter()
+                .map(|ip| u32::from_be_bytes(ip.octets()))
+                .collect();
+            ipv4.insert(
+                "dns".into(),
+                Value::from(dns_u32).try_into().map_err(nm_err)?,
+            );
+
+            settings
+                .call::<_, _, ()>("Update", &(existing,))
+                .await
+                .map_err(nm_err)?;
+
+            let dev = find_device_path(&self.zbus, iface).await?;
+            let nm = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                "/org/freedesktop/NetworkManager",
+                "org.freedesktop.NetworkManager",
+            )
+            .await
+            .map_err(nm_err)?;
+            let specific: zbus::zvariant::ObjectPath = "/".try_into().map_err(nm_err)?;
+            nm.call::<_, _, zbus::zvariant::OwnedObjectPath>(
+                "ActivateConnection",
+                &(settings_path, dev, specific),
+            )
+            .await
+            .map_err(nm_err)?;
+            Ok::<(), NetError>(())
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
     async fn connect_wifi(&self, ssid: &str, cred: WifiCredential) -> Result<(), NetError> {
@@ -509,5 +670,18 @@ mod live_tests {
             println!("  {n:?}");
         }
         assert!(!nets.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "destructive; requires live-nm-destructive and a throwaway box"]
+    #[cfg(feature = "live-nm-destructive")]
+    async fn set_dhcp_live() {
+        let f = NmrsFacade::new().await.unwrap();
+        let ifs = f.list_interfaces().await.unwrap();
+        let eth = ifs
+            .iter()
+            .find(|i| matches!(i.iface_type, IfaceType::Ethernet))
+            .expect("need at least one Ethernet interface");
+        f.set_dhcp(&eth.name).await.unwrap();
     }
 }

@@ -15,6 +15,7 @@ default = ["mock"]
 mock = []
 live-nm = ["dep:nmrs", "dep:zbus"]
 live-ble = ["dep:bluer", "dep:futures-util", "dep:sd-notify", "live-nm"]
+live-nm-destructive = ["live-nm"]
 
 [dependencies]
 netprov-protocol = { path = "../protocol" }

@@ -49,3 +49,29 @@ tokio = { workspace = true, features = ["test-util"] }
 proptest.workspace = true
 tempfile = "3"
 netprov-client = { path = "../client" }
+
+[package.metadata.deb]
+name = "netprov"
+maintainer = "Richard Osterloh <richard.osterloh@gmail.com>"
+depends = "bluez, network-manager, libdbus-1-3"
+section = "net"
+priority = "optional"
+extended-description = """
+netprov provides a BLE GATT interface for configuring network settings on
+headless embedded Linux devices. Includes both the netprovd daemon and the
+netprov client CLI.
+"""
+assets = [
+    ["target/release/netprovd", "usr/bin/", "755"],
+    ["target/release/netprov",  "usr/bin/", "755"],
+    ["../../packaging/netprovd.service", "lib/systemd/system/", "644"],
+    ["../../packaging/README.md", "usr/share/doc/netprov/", "644"],
+]
+conf-files = []
+maintainer-scripts = "packaging/debian/"
+features = ["live-ble", "live-nm"]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "packaging/"
+enable = false
+start = false

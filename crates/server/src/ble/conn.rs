@@ -9,8 +9,8 @@ use crate::rate_limit::RateLimiter;
 use crate::session::{dispatch, Session};
 use netprov_protocol::{
     decode_request, encode_response, fragment, parse_frame, InfoPayload, ProtocolError,
-    Reassembler, Request, Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, TAG_LEN,
-    PROTOCOL_VERSION, PSK_LEN,
+    Reassembler, Request, Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, PROTOCOL_VERSION,
+    PSK_LEN, TAG_LEN,
 };
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;

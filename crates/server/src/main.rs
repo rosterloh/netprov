@@ -1,15 +1,15 @@
 use clap::{Parser, Subcommand};
 use netprov_server::keygen::{run_keygen, KeygenArgs};
 use netprov_server::logging::{log_startup_banner, spawn_dev_key_warn_loop};
+use netprov_server::server_loop::run_tcp_server;
+#[cfg(feature = "live-ble")]
+use netprov_server::NmrsFacade;
 #[cfg(feature = "live-ble")]
 use netprov_server::{
     ble::{run_ble_server, BleServerConfig},
     notify::{notify_ready, notify_stopping},
 };
-use netprov_server::server_loop::run_tcp_server;
 use netprov_server::{load_key, LoadOptions, LoadedKey, MockFacade, RateLimiter};
-#[cfg(feature = "live-ble")]
-use netprov_server::NmrsFacade;
 use std::path::PathBuf;
 use std::sync::Arc;
 

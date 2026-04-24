@@ -308,7 +308,13 @@ impl NetworkFacade for NmrsFacade {
             let wifi_dev = find_wifi_device_path(&self.zbus).await?;
             let wifi_dev = match wifi_dev {
                 Some(p) => p,
-                None => return Ok(WifiStatus { ssid: None, signal: None, security: None }),
+                None => {
+                    return Ok(WifiStatus {
+                        ssid: None,
+                        signal: None,
+                        security: None,
+                    })
+                }
             };
             let dev = zbus::Proxy::new(
                 &self.zbus,
@@ -318,10 +324,16 @@ impl NetworkFacade for NmrsFacade {
             )
             .await
             .map_err(nm_err)?;
-            let ap_path: zbus::zvariant::OwnedObjectPath =
-                dev.get_property("ActiveAccessPoint").await.map_err(nm_err)?;
+            let ap_path: zbus::zvariant::OwnedObjectPath = dev
+                .get_property("ActiveAccessPoint")
+                .await
+                .map_err(nm_err)?;
             if ap_path.as_str() == "/" {
-                return Ok(WifiStatus { ssid: None, signal: None, security: None });
+                return Ok(WifiStatus {
+                    ssid: None,
+                    signal: None,
+                    security: None,
+                });
             }
             let ap = zbus::Proxy::new(
                 &self.zbus,
@@ -436,7 +448,10 @@ impl NetworkFacade for NmrsFacade {
                 std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
             > = settings.call("GetSettings", &()).await.map_err(nm_err)?;
             let ipv4 = existing.entry("ipv4".into()).or_default();
-            ipv4.insert("method".into(), Value::from("auto").try_into().map_err(nm_err)?);
+            ipv4.insert(
+                "method".into(),
+                Value::from("auto").try_into().map_err(nm_err)?,
+            );
             ipv4.remove("addresses");
             ipv4.remove("address-data");
             ipv4.remove("gateway");
@@ -493,16 +508,24 @@ impl NetworkFacade for NmrsFacade {
             let mut ad = std::collections::HashMap::new();
             ad.insert(
                 "address".to_string(),
-                Value::from(cfg.address.addr().to_string()).try_into().map_err(nm_err)?,
+                Value::from(cfg.address.addr().to_string())
+                    .try_into()
+                    .map_err(nm_err)?,
             );
             ad.insert(
                 "prefix".to_string(),
-                Value::from(cfg.address.prefix_len() as u32).try_into().map_err(nm_err)?,
+                Value::from(cfg.address.prefix_len() as u32)
+                    .try_into()
+                    .map_err(nm_err)?,
             );
-            let addr_data: Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> = vec![ad];
+            let addr_data: Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>> =
+                vec![ad];
 
             let ipv4 = existing.entry("ipv4".into()).or_default();
-            ipv4.insert("method".into(), Value::from("manual").try_into().map_err(nm_err)?);
+            ipv4.insert(
+                "method".into(),
+                Value::from("manual").try_into().map_err(nm_err)?,
+            );
             ipv4.insert(
                 "address-data".into(),
                 Value::from(addr_data).try_into().map_err(nm_err)?,

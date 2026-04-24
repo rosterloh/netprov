@@ -15,16 +15,12 @@ use std::time::Duration;
 // The client cannot depend on the server crate (that would create a cycle via
 // netprov-protocol). The server's uuids.rs is the canonical source — these
 // must track it exactly.
-const SERVICE_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0x0eebc1ba_773d_4625_babf_5c6cafe82b30);
-const INFO_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0xc4c47504_92f6_45d0_97b2_24c965499cf8);
-const CHALLENGE_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_925b_7dd4ec0aafb6);
+const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0eebc1ba_773d_4625_babf_5c6cafe82b30);
+const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(0xc4c47504_92f6_45d0_97b2_24c965499cf8);
+const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_925b_7dd4ec0aafb6);
 const AUTH_RESPONSE_UUID: bluer::Uuid =
     bluer::Uuid::from_u128(0xb78f3640_d56a_487b_b10e_f5dea9facf3c);
-const REQUEST_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
+const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
 
 pub struct BleClient {
     _device: bluer::Device,

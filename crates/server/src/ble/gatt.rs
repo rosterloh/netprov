@@ -1,12 +1,10 @@
 //! Construct the bluer Application describing netprov's GATT service.
 
-use super::uuids::{
-    AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID,
-};
+use super::uuids::{AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID};
 use bluer::gatt::local::{
     characteristic_control, Application, Characteristic, CharacteristicControl,
-    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead,
-    CharacteristicWrite, CharacteristicWriteMethod, Service,
+    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite,
+    CharacteristicWriteMethod, Service,
 };
 use std::sync::Arc;
 
@@ -75,8 +73,11 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                         method: CharacteristicWriteMethod::Fun(Box::new(move |value, _req| {
                             let ok = (auth_write)(value);
                             Box::pin(async move {
-                                if ok { Ok(()) }
-                                else { Err(bluer::gatt::local::ReqError::NotAuthorized) }
+                                if ok {
+                                    Ok(())
+                                } else {
+                                    Err(bluer::gatt::local::ReqError::NotAuthorized)
+                                }
                             })
                         })),
                         ..Default::default()
@@ -109,5 +110,8 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
         ..Default::default()
     };
 
-    BuiltApp { app, notify_control }
+    BuiltApp {
+        app,
+        notify_control,
+    }
 }

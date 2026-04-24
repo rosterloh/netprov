@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        # Remove the key dir on purge, not on plain remove — keys survive upgrades.
+        rm -rf /etc/netprov
+        ;;
+    remove)
+        ;;
+esac
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+
+#DEBHELPER#
+
+exit 0

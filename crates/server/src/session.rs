@@ -1,9 +1,57 @@
 use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
-use crate::validate::validate_static_ipv4;
 use netprov_protocol::*;
 use rand::RngCore;
 use std::sync::Arc;
+
+pub async fn dispatch<F: NetworkFacade>(facade: &F, req: Request) -> Response {
+    use netprov_protocol::{Op, OpResult};
+    let request_id = req.request_id;
+    let result = match req.op {
+        Op::ListInterfaces => facade
+            .list_interfaces()
+            .await
+            .map(OpResult::Interfaces)
+            .map_err(Into::into),
+        Op::GetIpConfig { iface } => facade
+            .get_ip_config(&iface)
+            .await
+            .map(OpResult::IpConfig)
+            .map_err(Into::into),
+        Op::WifiStatus => facade
+            .wifi_status()
+            .await
+            .map(OpResult::WifiStatus)
+            .map_err(Into::into),
+        Op::WifiScan => facade
+            .scan_wifi()
+            .await
+            .map(OpResult::WifiNetworks)
+            .map_err(Into::into),
+        Op::SetDhcp { iface } => facade
+            .set_dhcp(&iface)
+            .await
+            .map(|_| OpResult::Ok)
+            .map_err(Into::into),
+        Op::SetStaticIpv4 { iface, cfg } => {
+            if let Err(e) = crate::validate::validate_static_ipv4(&cfg) {
+                Err(e.into())
+            } else {
+                facade
+                    .set_static_ipv4(&iface, cfg)
+                    .await
+                    .map(|_| OpResult::Ok)
+                    .map_err(Into::into)
+            }
+        }
+        Op::ConnectWifi { ssid, credential } => facade
+            .connect_wifi(&ssid, credential)
+            .await
+            .map(|_| OpResult::Ok)
+            .map_err(Into::into),
+    };
+    Response { request_id, result }
+}
 
 pub struct Session<F: NetworkFacade> {
     psk: Psk,
@@ -95,57 +143,15 @@ impl<F: NetworkFacade> Session<F> {
                 result: Err(ProtocolError::NotAuthenticated),
             };
         }
-        let request_id = req.request_id;
-        let result = match req.op {
-            Op::ListInterfaces => self
-                .facade
-                .list_interfaces()
-                .await
-                .map(OpResult::Interfaces)
-                .map_err(Into::into),
-            Op::GetIpConfig { iface } => self
-                .facade
-                .get_ip_config(&iface)
-                .await
-                .map(OpResult::IpConfig)
-                .map_err(Into::into),
-            Op::WifiStatus => self
-                .facade
-                .wifi_status()
-                .await
-                .map(OpResult::WifiStatus)
-                .map_err(Into::into),
-            Op::WifiScan => self
-                .facade
-                .scan_wifi()
-                .await
-                .map(OpResult::WifiNetworks)
-                .map_err(Into::into),
-            Op::SetDhcp { iface } => self
-                .facade
-                .set_dhcp(&iface)
-                .await
-                .map(|_| OpResult::Ok)
-                .map_err(Into::into),
-            Op::SetStaticIpv4 { iface, cfg } => {
-                if let Err(e) = validate_static_ipv4(&cfg) {
-                    Err(e.into())
-                } else {
-                    self.facade
-                        .set_static_ipv4(&iface, cfg)
-                        .await
-                        .map(|_| OpResult::Ok)
-                        .map_err(Into::into)
-                }
-            }
-            Op::ConnectWifi { ssid, credential } => self
-                .facade
-                .connect_wifi(&ssid, credential)
-                .await
-                .map(|_| OpResult::Ok)
-                .map_err(Into::into),
-        };
-        Response { request_id, result }
+        dispatch(&*self.facade, req).await
+    }
+
+    pub fn facade_clone(&self) -> Arc<F> {
+        self.facade.clone()
+    }
+
+    pub fn peer_id_for_log(&self) -> &str {
+        &self.peer_id
     }
 }
 

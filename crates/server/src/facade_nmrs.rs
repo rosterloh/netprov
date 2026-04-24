@@ -33,6 +33,55 @@ fn nm_err<E: std::fmt::Display>(e: E) -> NetError {
     NetError::NetworkManager(e.to_string())
 }
 
+async fn find_wifi_device_path(
+    conn: &zbus::Connection,
+) -> Result<Option<zbus::zvariant::OwnedObjectPath>, NetError> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager",
+        "org.freedesktop.NetworkManager",
+    )
+    .await
+    .map_err(nm_err)?;
+    let devices: Vec<zbus::zvariant::OwnedObjectPath> =
+        proxy.call("GetDevices", &()).await.map_err(nm_err)?;
+    for path in devices {
+        let dev = zbus::Proxy::new(
+            conn,
+            "org.freedesktop.NetworkManager",
+            path.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .await
+        .map_err(nm_err)?;
+        let dev_type: u32 = dev.get_property("DeviceType").await.map_err(nm_err)?;
+        if dev_type == 2 {
+            // NM_DEVICE_TYPE_WIFI
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn classify_security(flags: u32, wpa: u32, rsn: u32) -> Security {
+    // NM_802_11_AP_FLAGS_PRIVACY = 0x1. If no privacy and no WPA/RSN → Open.
+    if flags & 0x1 == 0 && wpa == 0 && rsn == 0 {
+        return Security::Open;
+    }
+    // NM_802_11_AP_SEC_KEY_MGMT_SAE = 0x400
+    if rsn & 0x400 != 0 {
+        return Security::Wpa3;
+    }
+    if rsn != 0 {
+        return Security::Wpa2Psk;
+    }
+    if wpa != 0 {
+        return Security::WpaPsk;
+    }
+    Security::Wep
+}
+
 async fn find_device_path(
     conn: &zbus::Connection,
     iface: &str,
@@ -222,8 +271,47 @@ impl NetworkFacade for NmrsFacade {
     }
 
     async fn wifi_status(&self) -> Result<WifiStatus, NetError> {
-        // TODO(part-2-nmrs): implement via nmrs API or raw zbus AP lookup.
-        Err(NetError::NotSupported)
+        tokio::time::timeout(OP_TIMEOUT, async {
+            let wifi_dev = find_wifi_device_path(&self.zbus).await?;
+            let wifi_dev = match wifi_dev {
+                Some(p) => p,
+                None => return Ok(WifiStatus { ssid: None, signal: None, security: None }),
+            };
+            let dev = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                wifi_dev.as_str(),
+                "org.freedesktop.NetworkManager.Device.Wireless",
+            )
+            .await
+            .map_err(nm_err)?;
+            let ap_path: zbus::zvariant::OwnedObjectPath =
+                dev.get_property("ActiveAccessPoint").await.map_err(nm_err)?;
+            if ap_path.as_str() == "/" {
+                return Ok(WifiStatus { ssid: None, signal: None, security: None });
+            }
+            let ap = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                ap_path.as_str(),
+                "org.freedesktop.NetworkManager.AccessPoint",
+            )
+            .await
+            .map_err(nm_err)?;
+            let ssid_bytes: Vec<u8> = ap.get_property("Ssid").await.map_err(nm_err)?;
+            let ssid = String::from_utf8(ssid_bytes).ok();
+            let strength: u8 = ap.get_property("Strength").await.map_err(nm_err)?;
+            let flags: u32 = ap.get_property("Flags").await.map_err(nm_err)?;
+            let wpa_flags: u32 = ap.get_property("WpaFlags").await.map_err(nm_err)?;
+            let rsn_flags: u32 = ap.get_property("RsnFlags").await.map_err(nm_err)?;
+            Ok::<_, NetError>(WifiStatus {
+                ssid,
+                signal: Some(strength),
+                security: Some(classify_security(flags, wpa_flags, rsn_flags)),
+            })
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
     async fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, NetError> {
@@ -274,5 +362,13 @@ mod live_tests {
         let iface = ifs.first().expect("at least one interface");
         let cfg = f.get_ip_config(&iface.name).await.unwrap();
         println!("{cfg:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Wi-Fi adapter with an active AP"]
+    async fn wifi_status_live() {
+        let f = NmrsFacade::new().await.unwrap();
+        let st = f.wifi_status().await.unwrap();
+        println!("{st:?}");
     }
 }

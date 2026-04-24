@@ -315,8 +315,73 @@ impl NetworkFacade for NmrsFacade {
     }
 
     async fn scan_wifi(&self) -> Result<Vec<WifiNetwork>, NetError> {
-        // TODO(part-2-nmrs): implement via nmrs API.
-        Err(NetError::NotSupported)
+        tokio::time::timeout(OP_TIMEOUT, async {
+            let wifi_path = find_wifi_device_path(&self.zbus)
+                .await?
+                .ok_or(NetError::NotSupported)?;
+            let dev = zbus::Proxy::new(
+                &self.zbus,
+                "org.freedesktop.NetworkManager",
+                wifi_path.as_str(),
+                "org.freedesktop.NetworkManager.Device.Wireless",
+            )
+            .await
+            .map_err(nm_err)?;
+            let before: i64 = dev.get_property("LastScan").await.unwrap_or(0);
+
+            // RequestScan takes a dict of options; empty dict is fine.
+            let opts: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
+                std::collections::HashMap::new();
+            dev.call::<_, _, ()>("RequestScan", &(opts,))
+                .await
+                .map_err(nm_err)?;
+
+            // Poll LastScan up to 10 seconds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let now: i64 = dev.get_property("LastScan").await.unwrap_or(0);
+                if now != before {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(NetError::Timeout);
+                }
+            }
+
+            let aps: Vec<zbus::zvariant::OwnedObjectPath> =
+                dev.call("GetAccessPoints", &()).await.map_err(nm_err)?;
+            let mut out = Vec::with_capacity(aps.len());
+            for ap_path in aps {
+                let ap = zbus::Proxy::new(
+                    &self.zbus,
+                    "org.freedesktop.NetworkManager",
+                    ap_path.as_str(),
+                    "org.freedesktop.NetworkManager.AccessPoint",
+                )
+                .await
+                .map_err(nm_err)?;
+                let ssid_bytes: Vec<u8> = ap.get_property("Ssid").await.unwrap_or_default();
+                let ssid = String::from_utf8(ssid_bytes).unwrap_or_default();
+                if ssid.is_empty() {
+                    continue; // skip hidden networks
+                }
+                let strength: u8 = ap.get_property("Strength").await.unwrap_or(0);
+                let flags: u32 = ap.get_property("Flags").await.unwrap_or(0);
+                let wpa: u32 = ap.get_property("WpaFlags").await.unwrap_or(0);
+                let rsn: u32 = ap.get_property("RsnFlags").await.unwrap_or(0);
+                let bssid: String = ap.get_property("HwAddress").await.unwrap_or_default();
+                out.push(WifiNetwork {
+                    ssid,
+                    signal: Some(strength),
+                    security: Some(classify_security(flags, wpa, rsn)),
+                    bssid,
+                });
+            }
+            Ok::<_, NetError>(out)
+        })
+        .await
+        .map_err(|_| NetError::Timeout)?
     }
 
     async fn set_dhcp(&self, _iface: &str) -> Result<(), NetError> {
@@ -370,5 +435,17 @@ mod live_tests {
         let f = NmrsFacade::new().await.unwrap();
         let st = f.wifi_status().await.unwrap();
         println!("{st:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Wi-Fi adapter"]
+    async fn wifi_scan_live() {
+        let f = NmrsFacade::new().await.unwrap();
+        let nets = f.scan_wifi().await.unwrap();
+        println!("scanned {} networks", nets.len());
+        for n in &nets {
+            println!("  {n:?}");
+        }
+        assert!(!nets.is_empty());
     }
 }

@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+
+# Create config dir with restrictive perms; key file lands there via keygen.
+if [ ! -d /etc/netprov ]; then
+    mkdir -p /etc/netprov
+    chmod 700 /etc/netprov
+fi
+
+# Ensure the unit is known.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+
+#DEBHELPER#
+
+# Do NOT enable or start. Admin must install a production key first.
+cat <<'EOM'
+
+=========================================================================
+netprov installed.
+
+Before starting the service, install a production pre-shared key:
+    sudo netprovd keygen --install
+
+Then enable and start the daemon:
+    sudo systemctl enable --now netprovd
+
+To opt out of the embedded dev-key fallback in dev images, set
+    Environment=NETPROV_PRODUCTION=1
+in /etc/systemd/system/netprovd.service.d/override.conf.
+=========================================================================
+EOM
+
+exit 0

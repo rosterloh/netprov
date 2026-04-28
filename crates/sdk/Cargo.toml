@@ -1,0 +1,19 @@
+[package]
+name = "netprov-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+ble = ["dep:bluer", "dep:futures-util"]
+
+[dependencies]
+netprov-protocol = { path = "../protocol" }
+async-trait.workspace = true
+bluer = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }

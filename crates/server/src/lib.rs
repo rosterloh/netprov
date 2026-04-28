@@ -9,12 +9,12 @@ pub mod server_loop;
 pub mod session;
 pub mod validate;
 pub use facade::NetworkFacade;
-pub use key::{load_key, KeyError, KeySource, LoadOptions, LoadedKey, DEV_KEY};
-pub use keygen::{run_keygen, KeygenArgs, KeygenError};
+pub use key::{DEV_KEY, KeyError, KeySource, LoadOptions, LoadedKey, load_key};
+pub use keygen::{KeygenArgs, KeygenError, run_keygen};
 pub use logging::{log_startup_banner, spawn_dev_key_warn_loop};
 pub use rate_limit::{RateLimiter, RateLimiterConfig, SystemClock};
-pub use server_loop::{run_server, ServerConfig, ServerError};
-pub use session::{dispatch, Session};
+pub use server_loop::{ServerConfig, ServerError, run_server};
+pub use session::{Session, dispatch};
 pub use validate::validate_static_ipv4;
 
 #[cfg(feature = "mock")]

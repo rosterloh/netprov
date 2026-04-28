@@ -313,7 +313,7 @@ impl NetworkFacade for NmrsFacade {
                         ssid: None,
                         signal: None,
                         security: None,
-                    })
+                    });
                 }
             };
             let dev = zbus::Proxy::new(

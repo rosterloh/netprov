@@ -1,13 +1,13 @@
 //! BLE adapter initialization + per-peer connection fan-out.
 
 use super::conn::PeerSession;
-use super::gatt::{build_application, GattHandlers};
+use super::gatt::{GattHandlers, build_application};
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use bluer::{
+    Session as BluerSession,
     adv::{Advertisement, Type as AdvType},
     gatt::local::CharacteristicControlEvent,
-    Session as BluerSession,
 };
 use futures_util::StreamExt;
 use netprov_protocol::PSK_LEN;

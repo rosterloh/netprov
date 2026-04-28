@@ -3,7 +3,7 @@
 
 use netprov_client::Client;
 use netprov_protocol::*;
-use netprov_server::{run_server, MockFacade, RateLimiter, ServerConfig};
+use netprov_server::{MockFacade, RateLimiter, ServerConfig, run_server};
 use std::sync::Arc;
 
 fn spawn_pair(psk: Psk) -> Client<tokio::io::DuplexStream> {

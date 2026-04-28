@@ -1,16 +1,30 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/server", "crates/client"]
+members = [
+  "crates/protocol",
+  "crates/server",
+  "crates/sdk",
+  "crates/client",
+  "crates/app",
+]
 
 [workspace.package]
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.75"
+rust-version = "1.95"
 authors = ["Richard Osterloh <richard.osterloh@gmail.com>"]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "signal"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "time",
+  "io-util",
+  "fs",
+  "signal",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 ciborium = "0.2"

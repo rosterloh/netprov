@@ -4,8 +4,7 @@ use tokio::time;
 use tracing::{info, warn};
 
 pub const DEV_KEY_WARN_PERIOD: Duration = Duration::from_secs(60);
-pub const DEV_KEY_WARN_MARKER: &str =
-    "netprov: INSECURE: development key in use; run 'netprovd keygen --install' to install a production key";
+pub const DEV_KEY_WARN_MARKER: &str = "netprov: INSECURE: development key in use; run 'netprovd keygen --install' to install a production key";
 
 pub fn log_startup_banner(source: &KeySource) {
     match source {

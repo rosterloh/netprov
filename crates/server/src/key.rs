@@ -1,4 +1,4 @@
-use netprov_protocol::{Psk, PSK_LEN};
+use netprov_protocol::{PSK_LEN, Psk};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 

@@ -1,20 +1,19 @@
-//! BLE connector for the netprov CLI.
+//! BLE connector for app and CLI clients.
 //!
-//! Only compiled with --features ble.
+//! This module is Linux/BlueZ today through `bluer`. Android and iOS should
+//! add separate transport adapters behind the same SDK operation surface.
 
-use anyhow::{anyhow, bail, Context, Result};
-use bluer::{gatt::remote::Characteristic, AdapterEvent, Address};
+use crate::ops::{ProvisioningClient, SdkError};
+use async_trait::async_trait;
+use bluer::{AdapterEvent, Address, gatt::remote::Characteristic};
 use futures_util::StreamExt;
 use netprov_protocol::{
-    decode_response, encode_request, fragment, hmac_compute, parse_frame, Reassembler, Request,
-    Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, PSK_LEN,
+    MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, OpResult, PSK_LEN, Reassembler,
+    Request, Response, decode_response, encode_request, fragment, hmac_compute, parse_frame,
 };
 use std::time::Duration;
 
-// Redefine UUIDs here with the same values as in netprov-server's uuids.rs.
-// The client cannot depend on the server crate (that would create a cycle via
-// netprov-protocol). The server's uuids.rs is the canonical source — these
-// must track it exactly.
+// Must match crates/server/src/ble/uuids.rs.
 const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0eebc1ba_773d_4625_babf_5c6cafe82b30);
 const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(0xc4c47504_92f6_45d0_97b2_24c965499cf8);
 const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_925b_7dd4ec0aafb6);
@@ -33,12 +32,11 @@ pub struct BleClient {
 }
 
 impl BleClient {
-    pub async fn connect(peer: Address, psk: [u8; PSK_LEN]) -> Result<Self> {
+    pub async fn connect(peer: Address, psk: [u8; PSK_LEN]) -> Result<Self, SdkError> {
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
         adapter.set_powered(true).await?;
 
-        // Scan until we see the peer.
         let mut events = adapter.discover_devices().await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -46,9 +44,11 @@ impl BleClient {
                 ev = events.next() => match ev {
                     Some(AdapterEvent::DeviceAdded(a)) if a == peer => break,
                     Some(_) => continue,
-                    None => bail!("discovery stream ended"),
+                    None => return Err(SdkError::Ble("discovery stream ended".into())),
                 },
-                _ = tokio::time::sleep_until(deadline) => bail!("peer not seen within 10s"),
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(SdkError::Ble("peer not seen within 10s".into()));
+                }
             }
         }
         drop(events);
@@ -56,7 +56,6 @@ impl BleClient {
         let device = adapter.device(peer)?;
         device.connect().await?;
 
-        // Find our service — uuid() is async in bluer 0.17.4.
         let services = device.services().await?;
         let mut svc = None;
         for s in services {
@@ -65,9 +64,9 @@ impl BleClient {
                 break;
             }
         }
-        let svc = svc.ok_or_else(|| anyhow!("netprov service not found on {peer}"))?;
+        let svc =
+            svc.ok_or_else(|| SdkError::Ble(format!("netprov service not found on {peer}")))?;
 
-        // Find all four characteristics by UUID.
         let chars = svc.characteristics().await?;
         let mut info = None;
         let mut challenge = None;
@@ -85,49 +84,56 @@ impl BleClient {
                 request = Some(c);
             }
         }
-        let info = info.ok_or_else(|| anyhow!("INFO characteristic missing"))?;
-        let challenge = challenge.ok_or_else(|| anyhow!("CHALLENGE characteristic missing"))?;
-        let auth = auth.ok_or_else(|| anyhow!("AUTH_RESPONSE characteristic missing"))?;
-        let request = request.ok_or_else(|| anyhow!("REQUEST characteristic missing"))?;
 
         Ok(Self {
             _device: device,
-            info,
-            challenge,
-            auth,
-            request,
+            info: info.ok_or_else(|| SdkError::Ble("INFO characteristic missing".into()))?,
+            challenge: challenge
+                .ok_or_else(|| SdkError::Ble("CHALLENGE characteristic missing".into()))?,
+            auth: auth
+                .ok_or_else(|| SdkError::Ble("AUTH_RESPONSE characteristic missing".into()))?,
+            request: request
+                .ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?,
             next_id: 1,
             psk,
         })
     }
 
-    pub async fn authenticate(&self) -> Result<()> {
-        // Read Info first — confirms we're talking to a real netprov server.
+    pub async fn authenticate(&mut self) -> Result<(), SdkError> {
+        <Self as ProvisioningClient>::authenticate(self).await
+    }
+
+    pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
+        <Self as ProvisioningClient>::request(self, op).await
+    }
+}
+
+#[async_trait]
+impl ProvisioningClient for BleClient {
+    async fn authenticate(&mut self) -> Result<(), SdkError> {
+        // Read Info first to confirm the service is responsive. Protocol
+        // compatibility checks can be added here once the UI exposes versions.
         let _info = self.info.read().await?;
 
         let nonce = self.challenge.read().await?;
         if nonce.len() != NONCE_LEN {
-            bail!("bad nonce length: {}", nonce.len());
+            return Err(SdkError::UnexpectedMessage("nonce length"));
         }
         let mut n = [0u8; NONCE_LEN];
         n.copy_from_slice(&nonce);
         let tag = hmac_compute(&self.psk, &n);
-        self.auth.write(&tag).await.context("auth write")?;
+        self.auth.write(&tag).await?;
         Ok(())
     }
 
-    pub async fn request(
-        &mut self,
-        op: netprov_protocol::Op,
-    ) -> Result<netprov_protocol::OpResult> {
+    async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let bytes = encode_request(&Request { request_id: id, op })?;
 
-        // Subscribe BEFORE sending so we don't lose early response fragments.
+        // Subscribe before sending so early response fragments cannot be lost.
         let mut notify = self.request.notify_io().await?;
 
-        // MAX_PAYLOAD_PER_FRAME = 507; +5 = 512 (max MTU / Web Bluetooth ceiling).
         for f in fragment(id, &bytes, MAX_PAYLOAD_PER_FRAME + 5) {
             self.request.write(&f).await?;
         }
@@ -137,20 +143,24 @@ impl BleClient {
         loop {
             let n = tokio::io::AsyncReadExt::read(&mut notify, &mut buf).await?;
             if n == 0 {
-                bail!("notify stream closed");
+                return Err(SdkError::Ble("notify stream closed".into()));
             }
             let parsed = parse_frame(&buf[..n])?;
             if let Some(msg) = reassembler.push(parsed)? {
                 let resp: Response = decode_response(&msg)?;
                 if resp.request_id != id {
-                    bail!("id mismatch: expected {id}, got {}", resp.request_id);
+                    return Err(SdkError::IdMismatch {
+                        expected: id,
+                        got: resp.request_id,
+                    });
                 }
-                return resp.result.map_err(|e| anyhow!("{e}"));
+                return resp.result.map_err(Into::into);
             }
         }
     }
 }
 
-pub fn parse_peer_address(s: &str) -> Result<Address> {
-    s.parse().map_err(|e| anyhow!("invalid BD_ADDR {s}: {e}"))
+pub fn parse_peer_address(s: &str) -> Result<Address, SdkError> {
+    s.parse()
+        .map_err(|e| SdkError::Ble(format!("invalid BD_ADDR {s}: {e}")))
 }

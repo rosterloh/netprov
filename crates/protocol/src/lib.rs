@@ -14,4 +14,4 @@ pub use dto::*;
 pub use error::*;
 pub use framing::*;
 pub use message::*;
-pub use transport::{read_message, write_message, TransportError};
+pub use transport::{TransportError, read_message, write_message};

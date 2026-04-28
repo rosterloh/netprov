@@ -91,6 +91,29 @@ cargo deb -p netprov-server                            # build the .deb
 gates the mutating `NmrsFacade` integration tests that are unsafe to run in
 CI.
 
+## Desktop app dev setup
+
+The Dioxus desktop app is gated behind the `desktop` feature because it needs
+native GTK/WebKit development libraries on Linux. On Ubuntu/Debian:
+
+```bash
+sudo apt-get install -y \
+  pkg-config \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev \
+  libxdo-dev
+```
+
+Then run the BLE-first desktop app with:
+
+```bash
+cargo run -p netprov-app --features desktop
+```
+
+The app talks to target devices over BLE; the TCP transport remains a dev/test
+path for protocol regression coverage.
+
 ## Testing tiers
 
 | Tier | In CI? | Covers |

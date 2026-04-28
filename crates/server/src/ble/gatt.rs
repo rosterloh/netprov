@@ -2,9 +2,9 @@
 
 use super::uuids::{AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID};
 use bluer::gatt::local::{
-    characteristic_control, Application, Characteristic, CharacteristicControl,
-    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite,
-    CharacteristicWriteMethod, Service,
+    Application, Characteristic, CharacteristicControl, CharacteristicNotify,
+    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
+    Service, characteristic_control,
 };
 use std::sync::Arc;
 

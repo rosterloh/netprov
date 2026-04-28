@@ -1,8 +1,7 @@
 //! netprov client library.
 
-#[cfg(feature = "ble")]
-pub mod ble;
 pub mod cli;
-pub mod client;
 pub mod commands;
-pub use client::{Client, ClientError};
+#[cfg(feature = "ble")]
+pub use netprov_sdk::{BleClient, parse_peer_address};
+pub use netprov_sdk::{Netprov, ProvisioningClient, SdkError as ClientError, TcpClient as Client};

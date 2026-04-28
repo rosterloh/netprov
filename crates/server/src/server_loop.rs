@@ -2,7 +2,7 @@ use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
 use crate::session::Session;
 use netprov_protocol::*;
-use netprov_protocol::{read_message, write_message, TransportError};
+use netprov_protocol::{TransportError, read_message, write_message};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, ToSocketAddrs};

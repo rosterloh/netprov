@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use netprov_client::cli::Cli;
-use netprov_client::{client::Client, commands::dispatch};
+use netprov_client::{Client, commands::dispatch};
 use netprov_protocol::PSK_LEN;
 
 #[tokio::main]
@@ -20,11 +20,11 @@ async fn main() -> Result<()> {
     #[cfg(feature = "ble")]
     {
         if let Some(peer) = cli.ble_peer.as_deref() {
-            use netprov_client::ble::{parse_peer_address, BleClient};
+            use netprov_client::{BleClient, parse_peer_address};
             let addr = parse_peer_address(peer)?;
             let mut client = BleClient::connect(addr, psk).await?;
             client.authenticate().await?;
-            return netprov_client::commands::dispatch_ble(&mut client, cli.command).await;
+            return dispatch(&mut client, cli.command).await;
         }
     }
     #[cfg(not(feature = "ble"))]

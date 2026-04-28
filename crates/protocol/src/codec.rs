@@ -1,5 +1,5 @@
 use crate::message::{Request, Response};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 pub const MAX_MESSAGE_SIZE: usize = 4096;
 

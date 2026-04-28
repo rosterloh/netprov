@@ -18,8 +18,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notify_with_no_socket_is_noop() {
-        std::env::remove_var("NOTIFY_SOCKET");
+    fn notify_calls_do_not_panic() {
         notify_ready(); // must not panic
         notify_stopping();
     }

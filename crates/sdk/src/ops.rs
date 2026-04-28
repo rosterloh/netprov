@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use netprov_protocol::{
-    CodecError, FramingError, Interface, IpConfig, Op, OpResult, ProtocolError, StaticIpv4,
+    CodecError, FramingError, Interface, IpConfig, Op, OpResult, ProtocolError, Psk, StaticIpv4,
     TransportError, WifiCredential, WifiNetwork, WifiStatus,
 };
 
@@ -36,7 +36,7 @@ impl From<bluer::Error> for SdkError {
 
 #[async_trait]
 pub trait ProvisioningClient {
-    async fn authenticate(&mut self) -> Result<(), SdkError>;
+    async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError>;
     async fn request(&mut self, op: Op) -> Result<OpResult, SdkError>;
 }
 
@@ -64,8 +64,8 @@ impl<C> Netprov<C> {
 }
 
 impl<C: ProvisioningClient + Send> Netprov<C> {
-    pub async fn authenticate(&mut self) -> Result<(), SdkError> {
-        self.inner.authenticate().await
+    pub async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
+        self.inner.authenticate(psk).await
     }
 
     pub async fn list_interfaces(&mut self) -> Result<Vec<Interface>, SdkError> {

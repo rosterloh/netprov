@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use netprov_protocol::{Interface, PSK_LEN, WifiStatus};
-use netprov_sdk::{BleClient, Netprov, parse_peer_address};
+use netprov_sdk::{BleClient, BleDevice, Netprov, parse_peer_address};
+use std::time::Duration;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
@@ -17,6 +18,21 @@ enum ConnectionState {
 }
 
 #[derive(Clone, PartialEq)]
+enum ScanState {
+    Idle,
+    Scanning,
+    Complete,
+    Failed(String),
+}
+
+#[derive(Clone, PartialEq)]
+struct DeviceSummary {
+    address: String,
+    name: Option<String>,
+    rssi: Option<i16>,
+}
+
+#[derive(Clone, PartialEq)]
 struct DeviceSnapshot {
     interfaces: Vec<Interface>,
     wifi_status: WifiStatus,
@@ -27,13 +43,33 @@ fn App() -> Element {
     let mut peer = use_signal(String::new);
     let mut key_path = use_signal(|| "/etc/netprov/key".to_string());
     let mut state = use_signal(|| ConnectionState::Idle);
+    let mut scan_state = use_signal(|| ScanState::Idle);
+    let mut devices = use_signal(Vec::<DeviceSummary>::new);
     let mut snapshot = use_signal(|| None::<DeviceSnapshot>);
 
     let current_peer = peer();
     let current_key_path = key_path();
+    let devices_view = devices();
+    let scan_state_view = scan_state();
     let snapshot_view = snapshot();
     let state_view = state();
     let is_busy = matches!(state_view, ConnectionState::Busy);
+    let is_scanning = matches!(scan_state_view, ScanState::Scanning);
+    let can_connect = !is_busy && !current_peer.trim().is_empty();
+
+    let scan = move |_| {
+        scan_state.set(ScanState::Scanning);
+        devices.set(Vec::new());
+        spawn(async move {
+            match scan_ble_devices().await {
+                Ok(found) => {
+                    devices.set(found);
+                    scan_state.set(ScanState::Complete);
+                }
+                Err(err) => scan_state.set(ScanState::Failed(err)),
+            }
+        });
+    };
 
     let connect = move |_| {
         let peer_value = peer();
@@ -78,10 +114,30 @@ fn App() -> Element {
                         oninput: move |event| key_path.set(event.value()),
                     }
                 }
-                button {
+                div { class: "connection-actions",
+                    button {
+                        disabled: is_busy || is_scanning,
+                        onclick: scan,
+                        "Scan"
+                    }
+                    button {
+                        disabled: !can_connect,
+                        onclick: connect,
+                        "Connect"
+                    }
+                }
+            }
+
+            section { class: "device-panel",
+                div { class: "panel-heading",
+                    h2 { "Devices" }
+                    ScanStatus { state: scan_state_view.clone(), count: devices_view.len() }
+                }
+                DeviceList {
+                    devices: devices_view,
+                    selected_peer: current_peer.clone(),
                     disabled: is_busy,
-                    onclick: connect,
-                    "Connect"
+                    onselect: move |address: String| peer.set(address),
                 }
             }
 
@@ -121,6 +177,74 @@ fn EmptyState() -> Element {
         section { class: "empty-state",
             h2 { "No device connected" }
             p { "Select a BLE peer and connect to load network state." }
+        }
+    }
+}
+
+#[component]
+fn ScanStatus(state: ScanState, count: usize) -> Element {
+    match state {
+        ScanState::Idle => rsx! {
+            span { class: "scan-status", "Not scanned" }
+        },
+        ScanState::Scanning => rsx! {
+            span { class: "scan-status", "Scanning..." }
+        },
+        ScanState::Complete => rsx! {
+            span { class: "scan-status", "{count} found" }
+        },
+        ScanState::Failed(ref message) => rsx! {
+            span { class: "scan-status failed", "{message}" }
+        },
+    }
+}
+
+#[component]
+fn DeviceList(
+    devices: Vec<DeviceSummary>,
+    selected_peer: String,
+    disabled: bool,
+    onselect: EventHandler<String>,
+) -> Element {
+    if devices.is_empty() {
+        return rsx! {
+            p { class: "muted", "Scan to discover nearby netprov BLE devices." }
+        };
+    }
+
+    rsx! {
+        div { class: "device-list",
+            for device in devices {
+                {
+                    let selected = device.address == selected_peer;
+                    let row_class = if selected {
+                        "device-row selected"
+                    } else {
+                        "device-row"
+                    };
+                    let name = device
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "netprovd".to_string());
+                    let signal = device
+                        .rssi
+                        .map(|rssi| format!("{rssi} dBm"))
+                        .unwrap_or_else(|| "RSSI -".to_string());
+                    let address = device.address.clone();
+                    rsx! {
+                        button {
+                            class: row_class,
+                            disabled,
+                            onclick: move |_| onselect.call(address.clone()),
+                            div {
+                                strong { "{name}" }
+                                span { "{device.address}" }
+                            }
+                            span { class: "device-signal", "{signal}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -187,12 +311,21 @@ fn Metric(label: String, value: String) -> Element {
     }
 }
 
+async fn scan_ble_devices() -> Result<Vec<DeviceSummary>, String> {
+    let devices = BleClient::scan_devices(Duration::from_secs(8))
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(devices.into_iter().map(DeviceSummary::from).collect())
+}
+
 async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot, String> {
     if peer.trim().is_empty() {
         return Err("Peer address is required".into());
     }
 
-    let key = std::fs::read(&key_path).map_err(|err| format!("read {key_path}: {err}"))?;
+    let key = tokio::fs::read(&key_path)
+        .await
+        .map_err(|err| format!("read {key_path}: {err}"))?;
     if key.len() != PSK_LEN {
         return Err(format!("key length is {}, expected {PSK_LEN}", key.len()));
     }
@@ -200,12 +333,12 @@ async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot,
     psk.copy_from_slice(&key);
 
     let addr = parse_peer_address(peer.trim()).map_err(|err| err.to_string())?;
-    let client = BleClient::connect(addr, psk)
+    let client = BleClient::connect(addr)
         .await
         .map_err(|err| err.to_string())?;
     let mut netprov = Netprov::new(client);
     netprov
-        .authenticate()
+        .authenticate(psk)
         .await
         .map_err(|err| err.to_string())?;
     let interfaces = netprov
@@ -218,4 +351,14 @@ async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot,
         interfaces,
         wifi_status,
     })
+}
+
+impl From<BleDevice> for DeviceSummary {
+    fn from(value: BleDevice) -> Self {
+        Self {
+            address: value.address.to_string(),
+            name: value.name,
+            rssi: value.rssi,
+        }
+    }
 }

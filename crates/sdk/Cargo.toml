@@ -9,6 +9,7 @@ authors.workspace = true
 [features]
 default = []
 ble = ["dep:bluer", "dep:futures-util"]
+dev-tcp = []
 
 [dependencies]
 netprov-protocol = { path = "../protocol" }

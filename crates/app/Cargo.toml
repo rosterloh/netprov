@@ -19,3 +19,4 @@ desktop = ["dep:dioxus", "netprov-sdk/ble"]
 dioxus = { version = "0.7.3", features = ["desktop"], optional = true }
 netprov-protocol = { path = "../protocol" }
 netprov-sdk = { path = "../sdk" }
+tokio.workspace = true

@@ -107,6 +107,86 @@ button:disabled {
   opacity: 0.62;
 }
 
+.connection-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.device-panel {
+  border: 1px solid #c9d3d8;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 14px;
+  background: #ffffff;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.scan-status,
+.muted {
+  color: #59666f;
+}
+
+.scan-status {
+  font-weight: 700;
+}
+
+.scan-status.failed {
+  color: #7a2f25;
+}
+
+.muted {
+  margin: 12px 0 0;
+}
+
+.device-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid #c9d3d8;
+  background: #f7faf8;
+  color: #172026;
+  text-align: left;
+}
+
+.device-row.selected {
+  border-color: #1f6f56;
+  background: #dcefe2;
+}
+
+.device-row strong,
+.device-row span {
+  display: block;
+}
+
+.device-row span {
+  color: #59666f;
+  font-weight: 600;
+}
+
+.device-signal {
+  white-space: nowrap;
+}
+
 .error-row {
   border: 1px solid #c97463;
   border-radius: 8px;
@@ -212,6 +292,12 @@ button:disabled {
   .connection-panel,
   .dashboard {
     grid-template-columns: 1fr;
+  }
+
+  .connection-actions,
+  .device-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   button {

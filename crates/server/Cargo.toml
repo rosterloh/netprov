@@ -48,7 +48,7 @@ futures-util = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["test-util"] }
 proptest.workspace = true
 tempfile = "3"
-netprov-client = { path = "../client" }
+netprov-client = { path = "../client", features = ["dev-tcp"] }
 
 [package.metadata.deb]
 name = "netprov"

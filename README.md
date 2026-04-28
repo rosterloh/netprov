@@ -34,7 +34,7 @@ Three Rust crates in one workspace:
 |---|---|
 | `netprov-protocol` | Wire format: CBOR messages, framing, HMAC auth helpers. Transport-agnostic. |
 | `netprov-server` | `netprovd` daemon. BLE GATT driver, session state machine, `NetworkFacade` (mock + nmrs). |
-| `netprov-client` | `netprov` CLI. Connects over TCP (dev) or BLE (via `--ble-peer`). |
+| `netprov-client` | `netprov` CLI. Connects over BLE (via `--ble-peer`) or TCP behind the `dev-tcp` feature. |
 
 ## Install (from deb)
 
@@ -66,7 +66,7 @@ cp packaging/dev-key.bin /tmp/netprov-key.bin && chmod 600 /tmp/netprov-key.bin
 cargo run -p netprov-server --bin netprovd -- serve-tcp --listen 127.0.0.1:9600
 
 # another terminal
-cargo run -p netprov-client --bin netprov -- \
+cargo run -p netprov-client --features dev-tcp --bin netprov -- \
   --key-path /tmp/netprov-key.bin --endpoint 127.0.0.1:9600 list
 ```
 

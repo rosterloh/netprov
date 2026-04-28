@@ -5,10 +5,12 @@
 
 #[cfg(feature = "ble")]
 pub mod ble;
+#[cfg(feature = "dev-tcp")]
 pub mod client;
 pub mod ops;
 
 #[cfg(feature = "ble")]
-pub use ble::{BleClient, parse_peer_address};
+pub use ble::{BleClient, BleDevice, parse_peer_address};
+#[cfg(feature = "dev-tcp")]
 pub use client::TcpClient;
 pub use ops::{Netprov, ProvisioningClient, SdkError};

@@ -3187,6 +3187,7 @@ dependencies = [
  "dioxus",
  "netprov-protocol",
  "netprov-sdk",
+ "tokio",
 ]
 
 [[package]]

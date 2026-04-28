@@ -9,18 +9,16 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub struct TcpClient<IO> {
     r: tokio::io::ReadHalf<IO>,
     w: tokio::io::WriteHalf<IO>,
-    psk: Psk,
     next_id: u16,
     authenticated: bool,
 }
 
 impl<IO: AsyncRead + AsyncWrite> TcpClient<IO> {
-    pub fn new(io: IO, psk: Psk) -> Self {
+    pub fn new(io: IO) -> Self {
         let (r, w) = tokio::io::split(io);
         Self {
             r,
             w,
-            psk,
             next_id: 1,
             authenticated: false,
         }
@@ -42,8 +40,8 @@ impl<IO> TcpClient<IO>
 where
     IO: AsyncRead + AsyncWrite + Send,
 {
-    pub async fn authenticate(&mut self) -> Result<(), SdkError> {
-        <Self as ProvisioningClient>::authenticate(self).await
+    pub async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
+        <Self as ProvisioningClient>::authenticate(self, psk).await
     }
 
     pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
@@ -56,7 +54,7 @@ impl<IO> ProvisioningClient for TcpClient<IO>
 where
     IO: AsyncRead + AsyncWrite + Send,
 {
-    async fn authenticate(&mut self) -> Result<(), SdkError> {
+    async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
         self.send(Envelope::NonceRequest).await?;
         let nonce = match self.recv().await? {
             Envelope::NonceReply(bytes) => {
@@ -70,7 +68,7 @@ where
             Envelope::AuthFail => return Err(SdkError::AuthFailed),
             _ => return Err(SdkError::UnexpectedMessage("expected NonceReply")),
         };
-        let tag = hmac_compute(&self.psk, &nonce);
+        let tag = hmac_compute(&psk, &nonce);
         self.send(Envelope::AuthSubmit(tag.to_vec())).await?;
         match self.recv().await? {
             Envelope::AuthOk => {

@@ -5,12 +5,17 @@
 
 use crate::ops::{ProvisioningClient, SdkError};
 use async_trait::async_trait;
-use bluer::{AdapterEvent, Address, gatt::remote::Characteristic};
+use bluer::{
+    Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
+    gatt::remote::Characteristic,
+};
 use futures_util::StreamExt;
 use netprov_protocol::{
-    MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, OpResult, PSK_LEN, Reassembler,
-    Request, Response, decode_response, encode_request, fragment, hmac_compute, parse_frame,
+    FRAME_HEADER_LEN, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, OpResult, Psk,
+    Reassembler, Request, Response, decode_response, encode_request, fragment, hmac_compute,
+    parse_frame,
 };
+use std::collections::HashSet;
 use std::time::Duration;
 
 // Must match crates/server/src/ble/uuids.rs.
@@ -20,6 +25,14 @@ const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_
 const AUTH_RESPONSE_UUID: bluer::Uuid =
     bluer::Uuid::from_u128(0xb78f3640_d56a_487b_b10e_f5dea9facf3c);
 const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
+const BLE_FRAME_MAX_LEN: usize = MAX_PAYLOAD_PER_FRAME + FRAME_HEADER_LEN;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BleDevice {
+    pub address: Address,
+    pub name: Option<String>,
+    pub rssi: Option<i16>,
+}
 
 pub struct BleClient {
     _device: bluer::Device,
@@ -28,11 +41,47 @@ pub struct BleClient {
     auth: Characteristic,
     request: Characteristic,
     next_id: u16,
-    psk: [u8; PSK_LEN],
 }
 
 impl BleClient {
-    pub async fn connect(peer: Address, psk: [u8; PSK_LEN]) -> Result<Self, SdkError> {
+    pub async fn scan_devices(timeout: Duration) -> Result<Vec<BleDevice>, SdkError> {
+        let session = bluer::Session::new().await?;
+        let adapter = session.default_adapter().await?;
+        adapter.set_powered(true).await?;
+
+        let mut uuids = HashSet::new();
+        uuids.insert(SERVICE_UUID);
+        adapter
+            .set_discovery_filter(DiscoveryFilter {
+                uuids,
+                transport: DiscoveryTransport::Le,
+                ..Default::default()
+            })
+            .await?;
+
+        let mut events = adapter.discover_devices_with_changes().await?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut found = Vec::new();
+
+        loop {
+            tokio::select! {
+                ev = events.next() => match ev {
+                    Some(AdapterEvent::DeviceAdded(addr)) => {
+                        if let Ok(Some(device)) = query_netprov_device(&adapter, addr).await {
+                            upsert_device(&mut found, device);
+                        }
+                    }
+                    Some(_) => continue,
+                    None => return Err(SdkError::Ble("discovery stream ended".into())),
+                },
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        Ok(found)
+    }
+
+    pub async fn connect(peer: Address) -> Result<Self, SdkError> {
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
         adapter.set_powered(true).await?;
@@ -95,12 +144,11 @@ impl BleClient {
             request: request
                 .ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?,
             next_id: 1,
-            psk,
         })
     }
 
-    pub async fn authenticate(&mut self) -> Result<(), SdkError> {
-        <Self as ProvisioningClient>::authenticate(self).await
+    pub async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
+        <Self as ProvisioningClient>::authenticate(self, psk).await
     }
 
     pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
@@ -110,7 +158,7 @@ impl BleClient {
 
 #[async_trait]
 impl ProvisioningClient for BleClient {
-    async fn authenticate(&mut self) -> Result<(), SdkError> {
+    async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
         // Read Info first to confirm the service is responsive. Protocol
         // compatibility checks can be added here once the UI exposes versions.
         let _info = self.info.read().await?;
@@ -121,7 +169,7 @@ impl ProvisioningClient for BleClient {
         }
         let mut n = [0u8; NONCE_LEN];
         n.copy_from_slice(&nonce);
-        let tag = hmac_compute(&self.psk, &n);
+        let tag = hmac_compute(&psk, &n);
         self.auth.write(&tag).await?;
         Ok(())
     }
@@ -134,7 +182,9 @@ impl ProvisioningClient for BleClient {
         // Subscribe before sending so early response fragments cannot be lost.
         let mut notify = self.request.notify_io().await?;
 
-        for f in fragment(id, &bytes, MAX_PAYLOAD_PER_FRAME + 5) {
+        // fragment() takes the total BLE value length; the payload constant
+        // excludes the 5-byte netprov frame header.
+        for f in fragment(id, &bytes, BLE_FRAME_MAX_LEN) {
             self.request.write(&f).await?;
         }
 
@@ -163,4 +213,40 @@ impl ProvisioningClient for BleClient {
 pub fn parse_peer_address(s: &str) -> Result<Address, SdkError> {
     s.parse()
         .map_err(|e| SdkError::Ble(format!("invalid BD_ADDR {s}: {e}")))
+}
+
+async fn query_netprov_device(
+    adapter: &Adapter,
+    addr: Address,
+) -> Result<Option<BleDevice>, SdkError> {
+    let device = adapter.device(addr)?;
+    let uuids = device.uuids().await?.unwrap_or_default();
+    if !uuids.contains(&SERVICE_UUID) {
+        return Ok(None);
+    }
+
+    let name = device
+        .alias()
+        .await
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or(device.name().await?.filter(|value| !value.is_empty()));
+    let rssi = device.rssi().await?;
+
+    Ok(Some(BleDevice {
+        address: addr,
+        name,
+        rssi,
+    }))
+}
+
+fn upsert_device(devices: &mut Vec<BleDevice>, device: BleDevice) {
+    if let Some(existing) = devices
+        .iter_mut()
+        .find(|existing| existing.address == device.address)
+    {
+        *existing = device;
+    } else {
+        devices.push(device);
+    }
 }

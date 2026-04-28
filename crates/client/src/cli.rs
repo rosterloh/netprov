@@ -15,8 +15,8 @@ pub struct Cli {
     )]
     pub key_path: PathBuf,
 
-    /// TCP endpoint for loopback transport (Part 1). Part 2 will default to
-    /// BLE peer discovery.
+    /// TCP endpoint for the dev/test loopback transport. Requires the
+    /// `dev-tcp` feature.
     #[arg(long, env = "NETPROV_ENDPOINT", default_value = "127.0.0.1:9600")]
     pub endpoint: String,
 

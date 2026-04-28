@@ -22,5 +22,6 @@ ipnet = { workspace = true, features = ["serde"] }
 
 [features]
 default = []
-loopback = ["dep:netprov-server"]
+dev-tcp = ["netprov-sdk/dev-tcp"]
+loopback = ["dep:netprov-server", "dev-tcp"]
 ble = ["netprov-sdk/ble"]

@@ -9,8 +9,8 @@
 #![cfg(feature = "live-ble")]
 
 use netprov_server::{
-    ble::{run_ble_server, BleServerConfig},
     MockFacade, RateLimiter,
+    ble::{BleServerConfig, run_ble_server},
 };
 use std::sync::Arc;
 

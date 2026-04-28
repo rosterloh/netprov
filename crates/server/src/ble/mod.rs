@@ -7,4 +7,4 @@ pub mod gatt;
 pub mod server;
 pub mod uuids;
 
-pub use server::{run_ble_server, BleServerConfig};
+pub use server::{BleServerConfig, run_ble_server};

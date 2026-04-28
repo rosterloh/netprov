@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,6 +55,7 @@ jobs:
         run: cargo build -p netprov-server --features live-ble
 
   deb:
+    if: github.event_name == 'release'
     needs: test
     strategy:
       fail-fast: false

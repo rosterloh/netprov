@@ -6,11 +6,11 @@
 
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
-use crate::session::{dispatch, Session};
+use crate::session::{Session, dispatch};
 use netprov_protocol::{
-    decode_request, encode_response, fragment, parse_frame, InfoPayload, ProtocolError,
-    Reassembler, Request, Response, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, PROTOCOL_VERSION,
-    PSK_LEN, TAG_LEN,
+    InfoPayload, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, PROTOCOL_VERSION, PSK_LEN, ProtocolError,
+    Reassembler, Request, Response, TAG_LEN, decode_request, encode_response, fragment,
+    parse_frame,
 };
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;

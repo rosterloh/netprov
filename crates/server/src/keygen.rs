@@ -1,6 +1,6 @@
-use base64::prelude::{Engine, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine};
 use netprov_protocol::PSK_LEN;
-use qrcode::{render::unicode::Dense1x2, QrCode};
+use qrcode::{QrCode, render::unicode::Dense1x2};
 use rand::RngCore;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;

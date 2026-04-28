@@ -13,22 +13,15 @@ path = "src/main.rs"
 [dependencies]
 netprov-protocol = { path = "../protocol" }
 netprov-server = { path = "../server", features = ["mock"], optional = true }
+netprov-sdk = { path = "../sdk" }
 tokio = { workspace = true, features = ["net"] }
-serde.workspace = true
-ciborium.workspace = true
 anyhow.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { workspace = true, features = ["env"] }
-hmac.workspace = true
-sha2.workspace = true
-tokio-util.workspace = true
-thiserror.workspace = true
 ipnet = { workspace = true, features = ["serde"] }
-bluer = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
 
 [features]
 default = []
-loopback = ["dep:netprov-server"]
-ble = ["dep:bluer", "dep:futures-util"]
+dev-tcp = ["netprov-sdk/dev-tcp"]
+loopback = ["dep:netprov-server", "dev-tcp"]
+ble = ["netprov-sdk/ble"]

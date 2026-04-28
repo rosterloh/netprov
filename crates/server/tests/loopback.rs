@@ -3,7 +3,7 @@
 
 use netprov_client::Client;
 use netprov_protocol::*;
-use netprov_server::{run_server, MockFacade, RateLimiter, ServerConfig};
+use netprov_server::{MockFacade, RateLimiter, ServerConfig, run_server};
 use std::sync::Arc;
 
 fn spawn_pair(psk: Psk) -> Client<tokio::io::DuplexStream> {
@@ -19,14 +19,14 @@ fn spawn_pair(psk: Psk) -> Client<tokio::io::DuplexStream> {
         facade,
         rl,
     ));
-    Client::new(client_io, psk)
+    Client::new(client_io)
 }
 
 #[tokio::test]
 async fn authenticate_and_list_interfaces() {
     let psk = [7u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     let res = c.request(Op::ListInterfaces).await.unwrap();
     let ifs = match res {
         OpResult::Interfaces(v) => v,
@@ -49,9 +49,9 @@ async fn wrong_psk_fails_auth() {
         Arc::new(MockFacade::new()),
         Arc::new(RateLimiter::with_defaults()),
     ));
-    let mut c = Client::new(client_io, client_psk);
+    let mut c = Client::new(client_io);
     assert!(matches!(
-        c.authenticate().await,
+        c.authenticate(client_psk).await,
         Err(netprov_client::ClientError::AuthFailed)
     ));
 }
@@ -71,7 +71,7 @@ async fn unauth_request_rejected() {
 async fn get_ip_config_eth0() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     let res = c
         .request(Op::GetIpConfig {
             iface: "eth0".into(),
@@ -90,7 +90,7 @@ async fn get_ip_config_eth0() {
 async fn set_dhcp_then_read_back() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     c.request(Op::SetDhcp {
         iface: "eth0".into(),
     })
@@ -115,7 +115,7 @@ async fn set_dhcp_then_read_back() {
 async fn set_static_ipv4_then_read_back() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     c.request(Op::SetStaticIpv4 {
         iface: "eth0".into(),
         cfg: StaticIpv4 {
@@ -145,7 +145,7 @@ async fn set_static_ipv4_then_read_back() {
 async fn static_ipv4_validation_rejects_multicast() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     let err = c
         .request(Op::SetStaticIpv4 {
             iface: "eth0".into(),
@@ -167,7 +167,7 @@ async fn static_ipv4_validation_rejects_multicast() {
 async fn wifi_scan_returns_networks() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     let res = c.request(Op::WifiScan).await.unwrap();
     match res {
         OpResult::WifiNetworks(nets) => assert!(!nets.is_empty()),
@@ -179,7 +179,7 @@ async fn wifi_scan_returns_networks() {
 async fn connect_wifi_then_status_reflects_ssid() {
     let psk = [3u8; PSK_LEN];
     let mut c = spawn_pair(psk);
-    c.authenticate().await.unwrap();
+    c.authenticate(psk).await.unwrap();
     c.request(Op::ConnectWifi {
         ssid: "HomeWifi".into(),
         credential: WifiCredential::Wpa2Psk("super-secret".into()),

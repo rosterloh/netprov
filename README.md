@@ -34,7 +34,7 @@ Three Rust crates in one workspace:
 |---|---|
 | `netprov-protocol` | Wire format: CBOR messages, framing, HMAC auth helpers. Transport-agnostic. |
 | `netprov-server` | `netprovd` daemon. BLE GATT driver, session state machine, `NetworkFacade` (mock + nmrs). |
-| `netprov-client` | `netprov` CLI. Connects over TCP (dev) or BLE (via `--ble-peer`). |
+| `netprov-client` | `netprov` CLI. Connects over BLE (via `--ble-peer`) or TCP behind the `dev-tcp` feature. |
 
 ## Install (from deb)
 
@@ -66,7 +66,7 @@ cp packaging/dev-key.bin /tmp/netprov-key.bin && chmod 600 /tmp/netprov-key.bin
 cargo run -p netprov-server --bin netprovd -- serve-tcp --listen 127.0.0.1:9600
 
 # another terminal
-cargo run -p netprov-client --bin netprov -- \
+cargo run -p netprov-client --features dev-tcp --bin netprov -- \
   --key-path /tmp/netprov-key.bin --endpoint 127.0.0.1:9600 list
 ```
 
@@ -90,6 +90,29 @@ cargo deb -p netprov-server                            # build the .deb
 `live-ble` implies `live-nm` (production BLE needs NM). `live-nm-destructive`
 gates the mutating `NmrsFacade` integration tests that are unsafe to run in
 CI.
+
+## Desktop app dev setup
+
+The Dioxus desktop app is gated behind the `desktop` feature because it needs
+native GTK/WebKit development libraries on Linux. On Ubuntu/Debian:
+
+```bash
+sudo apt-get install -y \
+  pkg-config \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev \
+  libxdo-dev
+```
+
+Then run the BLE-first desktop app with:
+
+```bash
+cargo run -p netprov-app --features desktop
+```
+
+The app talks to target devices over BLE; the TCP transport remains a dev/test
+path for protocol regression coverage.
 
 ## Testing tiers
 

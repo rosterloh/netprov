@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use clap::Parser;
 use netprov_client::cli::Cli;
-use netprov_client::{client::Client, commands::dispatch};
+#[cfg(any(feature = "ble", feature = "dev-tcp"))]
+use netprov_client::commands::dispatch;
 use netprov_protocol::PSK_LEN;
 
 #[tokio::main]
@@ -20,11 +22,11 @@ async fn main() -> Result<()> {
     #[cfg(feature = "ble")]
     {
         if let Some(peer) = cli.ble_peer.as_deref() {
-            use netprov_client::ble::{parse_peer_address, BleClient};
+            use netprov_client::{BleClient, parse_peer_address};
             let addr = parse_peer_address(peer)?;
-            let mut client = BleClient::connect(addr, psk).await?;
-            client.authenticate().await?;
-            return netprov_client::commands::dispatch_ble(&mut client, cli.command).await;
+            let mut client = BleClient::connect(addr).await?;
+            client.authenticate(psk).await?;
+            return dispatch(&mut client, cli.command).await;
         }
     }
     #[cfg(not(feature = "ble"))]
@@ -34,11 +36,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    let sock = tokio::net::TcpStream::connect(&cli.endpoint)
-        .await
-        .with_context(|| format!("connect {}", cli.endpoint))?;
-    let mut client = Client::new(sock, psk);
-    client.authenticate().await.context("authenticate")?;
-    dispatch(&mut client, cli.command).await?;
-    Ok(())
+    #[cfg(feature = "dev-tcp")]
+    {
+        use netprov_client::Client;
+
+        let sock = tokio::net::TcpStream::connect(&cli.endpoint)
+            .await
+            .with_context(|| format!("connect {}", cli.endpoint))?;
+        let mut client = Client::new(sock);
+        client.authenticate(psk).await.context("authenticate")?;
+        dispatch(&mut client, cli.command).await?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "dev-tcp"))]
+    {
+        anyhow::bail!("TCP transport requires building with --features dev-tcp")
+    }
 }

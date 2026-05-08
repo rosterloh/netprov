@@ -3285,12 +3285,13 @@ dependencies = [
 
 [[package]]
 name = "nmrs"
-version = "2.4.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7d01d7eb7634d4811c0295d81de64cb4e9acbdfb91cf7148db02d8b091402c6"
+checksum = "e7e844f47ab7f54da2a16de939f5b52ad6c84b844be68e9338e3d32160ddcd68"
 dependencies = [
  "async-trait",
  "base64",
+ "bitflags 2.11.1",
  "futures",
  "futures-timer",
  "log",

@@ -16,7 +16,7 @@ rust-version = "1.95"
 authors = ["Richard Osterloh <richard.osterloh@gmail.com>"]
 
 [workspace.dependencies]
-tokio = { version = "1", features = [
+tokio = { version = "1.52.3", features = [
   "rt-multi-thread",
   "macros",
   "sync",
@@ -25,26 +25,26 @@ tokio = { version = "1", features = [
   "fs",
   "signal",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
-ciborium = "0.2"
-anyhow = "1"
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-journald = "0.3"
-async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
-hmac = "0.12"
-sha2 = "0.10"
-subtle = "2"
-rand = "0.8"
-proptest = "1"
-tokio-util = { version = "0.7", features = ["codec"] }
-ipnet = "2"
-bluer = { version = "0.17", features = ["bluetoothd", "l2cap"] }
-sd-notify = "0.5"
-futures-util = "0.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_bytes = "0.11.19"
+ciborium = "0.2.2"
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-journald = "0.3.2"
+async-trait = "0.1.89"
+clap = { version = "4.6.1", features = ["derive"] }
+hmac = "0.12.1"
+sha2 = "0.10.9"
+subtle = "2.6.1"
+rand = "0.8.6"
+proptest = "1.11.0"
+tokio-util = { version = "0.7.18", features = ["codec"] }
+ipnet = "2.12.0"
+bluer = { version = "0.17.4", features = ["bluetoothd", "l2cap"] }
+sd-notify = "0.5.0"
+futures-util = "0.3.32"
 
 [profile.release]
 lto = "thin"

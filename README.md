@@ -10,22 +10,21 @@ dev) or BLE (for production).
 
 ## Architecture
 
-```
-  BLE client (netprov CLI)
-            │
-            ▼  GATT over LE (bonded + app-layer HMAC auth)
-  ┌──────────────────────────────────────────────┐
-  │  netprovd  (systemd service, runs as root)   │
-  │                                              │
-  │   ┌─────────┐   ┌──────────┐   ┌──────────┐  │
-  │   │  BLE    │──▶│  Auth &  │──▶│ Network  │  │
-  │   │ GATT    │   │ Session  │   │  Facade  │  │
-  │   │ Server  │   │          │   │          │  │
-  │   └─────────┘   └──────────┘   └────┬─────┘  │
-  └─────────────────────────────────────┼────────┘
-                                        │ D-Bus
-                                        ▼
-                             NetworkManager (system)
+```mermaid
+flowchart TD
+    Client["BLE client (netprov CLI)"]
+    NM["NetworkManager (system)"]
+
+    subgraph Daemon["netprovd (systemd service, runs as root)"]
+        direction LR
+        GATT["BLE GATT Server"]
+        Session["Auth &amp; Session"]
+        Facade["Network Facade"]
+        GATT --> Session --> Facade
+    end
+
+    Client -->|"GATT over LE (bonded + app-layer HMAC auth)"| GATT
+    Facade -->|D-Bus| NM
 ```
 
 Three Rust crates in one workspace:

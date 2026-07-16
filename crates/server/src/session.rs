@@ -1,7 +1,7 @@
 use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
 use netprov_protocol::*;
-use rand::RngCore;
+use rand::Rng;
 use std::sync::Arc;
 
 pub async fn dispatch<F: NetworkFacade>(facade: &F, req: Request) -> Response {
@@ -92,7 +92,7 @@ impl<F: NetworkFacade> Session<F> {
     /// nonce, invalidates any prior pending nonce.
     pub fn issue_nonce(&mut self) -> Nonce {
         let mut nonce: Nonce = [0u8; NONCE_LEN];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
         self.state = SessionAuthState::Unauthenticated {
             pending_nonce: Some(nonce),
         };

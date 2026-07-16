@@ -20,7 +20,7 @@ jobs:
           - ubuntu-24.04-arm   # aarch64 (GitHub public ARM runner)
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install D-Bus + bluez headers
         run: |
@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y libdbus-1-dev pkg-config bluez
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -65,11 +65,11 @@ jobs:
           - ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install D-Bus + bluez
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config bluez
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -83,7 +83,7 @@ jobs:
       - name: Build deb
         run: cargo deb -p netprov-server --no-build
       - name: Upload deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: netprov-${{ matrix.runner }}
           path: target/debian/*.deb

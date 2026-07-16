@@ -12,7 +12,7 @@ members = [
 version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.95"
+rust-version = "1.97"
 authors = ["Richard Osterloh <richard.osterloh@gmail.com>"]
 
 [workspace.dependencies]
@@ -38,7 +38,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 hmac = "0.12.1"
 sha2 = "0.10.9"
 subtle = "2.6.1"
-rand = "0.8.6"
+rand = "0.10.2"
 proptest = "1.11.0"
 tokio-util = { version = "0.7.18", features = ["codec"] }
 ipnet = "2.12.0"

@@ -1,7 +1,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine};
 use netprov_protocol::PSK_LEN;
 use qrcode::{QrCode, render::unicode::Dense1x2};
-use rand::RngCore;
+use rand::Rng;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ impl Default for KeygenArgs {
 
 pub fn run_keygen(args: KeygenArgs, out: &mut dyn std::io::Write) -> Result<(), KeygenError> {
     let mut psk = [0u8; PSK_LEN];
-    rand::thread_rng().fill_bytes(&mut psk);
+    rand::rng().fill_bytes(&mut psk);
 
     let b64 = BASE64_STANDARD.encode(psk);
     writeln!(out, "Generated PSK ({PSK_LEN} bytes, base64):")?;

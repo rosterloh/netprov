@@ -121,7 +121,7 @@ impl Reassembler {
             let expected = (fin_seq as usize) + 1;
             if entry.frags.len() == expected {
                 let mut out = Vec::with_capacity(entry.total_bytes);
-                for (_, frag) in entry.frags.iter() {
+                for frag in entry.frags.values() {
                     out.extend_from_slice(frag);
                 }
                 self.state.remove(&f.request_id);

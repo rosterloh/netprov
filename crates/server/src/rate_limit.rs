@@ -86,31 +86,29 @@ impl<C: Clock> RateLimiter<C> {
         }
     }
 
+    /// Read-only: never inserts a map entry. An unseen peer is simply "not
+    /// locked out" — entries are only created by `record_failure`, so `check`
+    /// alone can't be used to grow the peer map unbounded.
     pub fn check(&self, peer: &str) -> CheckResult {
         let now = self.clock.now();
 
-        let mut global = self.global.lock().unwrap();
-        if let Some(until) = global.locked_until {
-            if now < until {
-                return CheckResult::Locked {
-                    retry_after: until - now,
-                };
-            }
-            global.locked_until = None;
-            global.failures.clear();
+        let global = self.global.lock().unwrap();
+        if let Some(until) = global.locked_until.filter(|&u| now < u) {
+            return CheckResult::Locked {
+                retry_after: until - now,
+            };
         }
         drop(global);
 
-        let mut map = self.state.lock().unwrap();
-        let e = map.entry(peer.to_string()).or_default();
-        if let Some(until) = e.locked_until {
-            if now < until {
-                return CheckResult::Locked {
-                    retry_after: until - now,
-                };
-            }
-            e.locked_until = None;
-            e.failures.clear();
+        let map = self.state.lock().unwrap();
+        if let Some(until) = map
+            .get(peer)
+            .and_then(|e| e.locked_until)
+            .filter(|&u| now < u)
+        {
+            return CheckResult::Locked {
+                retry_after: until - now,
+            };
         }
         CheckResult::Allowed
     }
@@ -332,6 +330,24 @@ mod tests {
         assert_eq!(map.len(), MAX_PEER_ENTRIES);
         assert!(!map.contains_key("peer-0"), "oldest entry should be evicted");
         assert!(map.contains_key(&format!("peer-{}", total - 1)));
+    }
+
+    #[test]
+    fn check_alone_never_inserts_map_entries() {
+        let clock = FakeClock::new();
+        let r = RateLimiter::new(RateLimiterConfig::default(), clock);
+        // Well beyond MAX_PEER_ENTRIES distinct, never-recording peer ids.
+        for i in 0..(MAX_PEER_ENTRIES * 2) {
+            assert!(matches!(
+                r.check(&format!("peer-{i}")),
+                CheckResult::Allowed
+            ));
+        }
+        assert_eq!(
+            r.state.lock().unwrap().len(),
+            0,
+            "check() must not insert entries into the peer map"
+        );
     }
 
     #[test]

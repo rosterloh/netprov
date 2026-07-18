@@ -1,6 +1,7 @@
 //! Construct the bluer Application describing netprov's GATT service.
 
 use super::uuids::{AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID};
+use bluer::Address;
 use bluer::gatt::local::{
     Application, Characteristic, CharacteristicControl, CharacteristicNotify,
     CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
@@ -9,10 +10,13 @@ use bluer::gatt::local::{
 use std::sync::Arc;
 
 /// Thin handle passed to each characteristic's closure so all four share state.
+/// The read/write handlers take the peer's device address so the server can
+/// mint a `PeerSession` on first GATT interaction, independent of when (or
+/// whether) the peer subscribes to notifications.
 pub struct GattHandlers {
-    pub on_info_read: Arc<dyn Fn() -> Vec<u8> + Send + Sync>,
-    pub on_nonce_read: Arc<dyn Fn() -> Vec<u8> + Send + Sync>,
-    pub on_auth_write: Arc<dyn Fn(Vec<u8>) -> bool + Send + Sync>,
+    pub on_info_read: Arc<dyn Fn(Address) -> Vec<u8> + Send + Sync>,
+    pub on_nonce_read: Arc<dyn Fn(Address) -> Vec<u8> + Send + Sync>,
+    pub on_auth_write: Arc<dyn Fn(Address, Vec<u8>) -> bool + Send + Sync>,
     pub on_request_write: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 }
 
@@ -42,8 +46,8 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                     uuid: INFO_UUID,
                     read: Some(CharacteristicRead {
                         read: true,
-                        fun: Box::new(move |_req| {
-                            let out = (info_read)();
+                        fun: Box::new(move |req| {
+                            let out = (info_read)(req.device_address);
                             Box::pin(async move { Ok(out) })
                         }),
                         ..Default::default()
@@ -55,8 +59,8 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                     uuid: CHALLENGE_UUID,
                     read: Some(CharacteristicRead {
                         read: true,
-                        fun: Box::new(move |_req| {
-                            let out = (nonce_read)();
+                        fun: Box::new(move |req| {
+                            let out = (nonce_read)(req.device_address);
                             Box::pin(async move { Ok(out) })
                         }),
                         ..Default::default()
@@ -70,8 +74,8 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                     write: Some(CharacteristicWrite {
                         write: true,
                         write_without_response: false,
-                        method: CharacteristicWriteMethod::Fun(Box::new(move |value, _req| {
-                            let ok = (auth_write)(value);
+                        method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
+                            let ok = (auth_write)(req.device_address, value);
                             Box::pin(async move {
                                 if ok {
                                     Ok(())

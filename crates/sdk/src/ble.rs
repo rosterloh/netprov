@@ -7,7 +7,7 @@ use crate::ops::{ProvisioningClient, SdkError};
 use async_trait::async_trait;
 use bluer::{
     Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
-    gatt::remote::Characteristic,
+    gatt::{CharacteristicReader, remote::Characteristic},
 };
 use futures_util::StreamExt;
 use netprov_protocol::{
@@ -40,6 +40,7 @@ pub struct BleClient {
     challenge: Characteristic,
     auth: Characteristic,
     request: Characteristic,
+    notify: CharacteristicReader,
     next_id: u16,
 }
 
@@ -134,6 +135,15 @@ impl BleClient {
             }
         }
 
+        let request =
+            request.ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?;
+
+        // Subscribe once up front so the server mints a PeerSession (and the
+        // notify path is live) before authentication begins, and so no
+        // response fragment can arrive between separate per-request
+        // subscriptions.
+        let notify = request.notify_io().await?;
+
         Ok(Self {
             _device: device,
             info: info.ok_or_else(|| SdkError::Ble("INFO characteristic missing".into()))?,
@@ -141,8 +151,8 @@ impl BleClient {
                 .ok_or_else(|| SdkError::Ble("CHALLENGE characteristic missing".into()))?,
             auth: auth
                 .ok_or_else(|| SdkError::Ble("AUTH_RESPONSE characteristic missing".into()))?,
-            request: request
-                .ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?,
+            request,
+            notify,
             next_id: 1,
         })
     }
@@ -179,9 +189,6 @@ impl ProvisioningClient for BleClient {
         self.next_id = self.next_id.wrapping_add(1);
         let bytes = encode_request(&Request { request_id: id, op })?;
 
-        // Subscribe before sending so early response fragments cannot be lost.
-        let mut notify = self.request.notify_io().await?;
-
         // fragment() takes the total BLE value length; the payload constant
         // excludes the 5-byte netprov frame header.
         for f in fragment(id, &bytes, BLE_FRAME_MAX_LEN) {
@@ -191,7 +198,7 @@ impl ProvisioningClient for BleClient {
         let mut buf = vec![0u8; MAX_MESSAGE_SIZE];
         let mut reassembler = Reassembler::new(MAX_MESSAGE_SIZE);
         loop {
-            let n = tokio::io::AsyncReadExt::read(&mut notify, &mut buf).await?;
+            let n = tokio::io::AsyncReadExt::read(&mut self.notify, &mut buf).await?;
             if n == 0 {
                 return Err(SdkError::Ble("notify stream closed".into()));
             }

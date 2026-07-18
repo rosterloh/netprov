@@ -268,6 +268,7 @@ where
                 // after disconnect would be delivered to the next peer (§7.5
                 // single-peer serial semantics).
                 while notify_rx.try_recv().is_ok() {}
+                peer.abort_handles();
                 *current.lock().unwrap() = None;
                 info!(peer = %peer_id, "peer session ended");
             }

@@ -35,8 +35,8 @@ pub struct PeerSession<F: NetworkFacade> {
     /// completes still fragments to a safe ceiling.
     pub mtu: AtomicUsize,
     /// Handles to in-flight dispatch tasks. Kept only so they aren't detached;
-    /// future hardening: abort on peer disconnect (currently we rely on
-    /// tokio runtime shutdown to drop them).
+    /// pruned of finished tasks on each push and aborted wholesale via
+    /// `abort_handles` when the peer session ends.
     pub dispatch_handles: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -90,9 +90,22 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().submit_auth(&tag)
     }
 
+    /// Aborts all in-flight dispatch tasks. Called when the peer session
+    /// ends (disconnect/resubscribe) so no stray task lingers past the
+    /// connection it was serving.
+    pub fn abort_handles(&self) {
+        for h in self.dispatch_handles.lock().unwrap().drain(..) {
+            h.abort();
+        }
+    }
+
     /// Request write handler — reassembles fragments, dispatches complete
     /// messages, emits fragmented responses back via notify_tx.
     pub fn on_request(self: &Arc<Self>, value: Vec<u8>) {
+        if !self.session.lock().unwrap().is_authenticated() {
+            warn!("dropping request frame from unauthenticated peer");
+            return;
+        }
         let parsed = match parse_frame(&value) {
             Ok(f) => f,
             Err(e) => {
@@ -151,6 +164,56 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                 }
             }
         });
-        self.dispatch_handles.lock().unwrap().push(handle);
+        let mut handles = self.dispatch_handles.lock().unwrap();
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+    }
+}
+
+#[cfg(all(test, feature = "mock"))]
+mod tests {
+    use super::*;
+    use crate::facade_mock::MockFacade;
+    use crate::rate_limit::RateLimiter;
+    use netprov_protocol::{Op, Request, encode_request, fragment};
+
+    fn new_peer() -> (Arc<PeerSession<MockFacade>>, NotifyRx) {
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let peer = PeerSession::new(
+            [0x11u8; PSK_LEN],
+            "peer".into(),
+            Arc::new(MockFacade::new()),
+            Arc::new(RateLimiter::with_defaults()),
+            "test-model".into(),
+            notify_tx,
+        );
+        (peer, notify_rx)
+    }
+
+    /// A request frame from an unauthenticated peer must be dropped before
+    /// it ever reaches the reassembler, and must not produce a response.
+    #[tokio::test]
+    async fn unauthenticated_request_leaves_no_reassembler_state() {
+        let (peer, mut notify_rx) = new_peer();
+        assert!(!peer.session.lock().unwrap().is_authenticated());
+
+        let req = Request {
+            request_id: 1,
+            op: Op::ListInterfaces,
+        };
+        let bytes = encode_request(&req).unwrap();
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
+            peer.on_request(f);
+        }
+
+        assert_eq!(
+            peer.reassembler.lock().unwrap().partial_count(),
+            0,
+            "unauthenticated frame must not create reassembler state"
+        );
+        assert!(
+            notify_rx.try_recv().is_err(),
+            "unauthenticated request must not produce a response"
+        );
     }
 }

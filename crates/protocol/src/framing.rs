@@ -26,6 +26,8 @@ pub enum FramingError {
         got: usize,
         fin_seq: u16,
     },
+    #[error("too many concurrent partial messages ({max})")]
+    TooManyPartials { max: usize },
 }
 
 pub fn fragment(request_id: u16, payload: &[u8], max_fragment: usize) -> Vec<Vec<u8>> {
@@ -56,6 +58,11 @@ fn encode_frame(request_id: u16, seq: u16, flags: u8, payload: &[u8]) -> Vec<u8>
 /// Per-connection, per-request reassembly buffer.
 pub struct Reassembler {
     pub max_message: usize,
+    /// Cap on distinct in-flight `request_id`s. The client is strictly
+    /// request/response, so this is generous headroom, not a real limit —
+    /// its purpose is to bound memory an unauthenticated or misbehaving
+    /// peer can hold via never-completed fragment sequences.
+    max_partials: usize,
     state: std::collections::HashMap<u16, PartialMessage>,
 }
 
@@ -88,6 +95,7 @@ impl Reassembler {
     pub fn new(max_message: usize) -> Self {
         Self {
             max_message,
+            max_partials: 4,
             state: Default::default(),
         }
     }
@@ -95,6 +103,11 @@ impl Reassembler {
     /// Feed one parsed fragment. Returns `Some(message_bytes)` when a FIN is
     /// received and all prior seqs are present.
     pub fn push(&mut self, f: ParsedFrame<'_>) -> Result<Option<Vec<u8>>, FramingError> {
+        if !self.state.contains_key(&f.request_id) && self.state.len() >= self.max_partials {
+            return Err(FramingError::TooManyPartials {
+                max: self.max_partials,
+            });
+        }
         let entry = self
             .state
             .entry(f.request_id)
@@ -134,6 +147,13 @@ impl Reassembler {
             }
         }
         Ok(None)
+    }
+
+    /// Number of distinct `request_id`s with in-flight partial state.
+    /// Exposed for tests asserting a rejected/dropped frame left no state
+    /// behind.
+    pub fn partial_count(&self) -> usize {
+        self.state.len()
     }
 }
 
@@ -200,6 +220,27 @@ mod tests {
         r.push(parse_frame(&f0).unwrap()).unwrap();
         let err = r.push(parse_frame(&f0b).unwrap()).unwrap_err();
         assert!(matches!(err, FramingError::DuplicateSeq { .. }));
+    }
+
+    #[test]
+    fn fifth_concurrent_partial_rejected() {
+        let mut r = Reassembler::new(4096);
+        // Open 4 partial messages (one unfinished fragment each) — all within
+        // the default max_partials cap.
+        for rid in 0..4u16 {
+            let f = encode_frame(rid, 0, 0, b"partial");
+            assert!(r.push(parse_frame(&f).unwrap()).unwrap().is_none());
+        }
+        // A 5th distinct request_id must be rejected before any state for it
+        // is created.
+        let f5 = encode_frame(4, 0, 0, b"partial");
+        let err = r.push(parse_frame(&f5).unwrap()).unwrap_err();
+        assert!(matches!(err, FramingError::TooManyPartials { max: 4 }));
+
+        // Existing partials are unaffected and can still be completed.
+        let fin = encode_frame(0, 1, FRAME_FLAG_FIN, b"!");
+        let out = r.push(parse_frame(&fin).unwrap()).unwrap();
+        assert_eq!(out.unwrap(), b"partial!");
     }
 
     use proptest::prelude::*;

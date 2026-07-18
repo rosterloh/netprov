@@ -34,10 +34,19 @@ pub struct PeerSession<F: NetworkFacade> {
     /// Defaults to `MAX_FRAME_LEN` so a response dispatched before subscribe
     /// completes still fragments to a safe ceiling.
     pub mtu: AtomicUsize,
-    /// Handles to in-flight dispatch tasks. Kept only so they aren't detached;
-    /// pruned of finished tasks on each push and aborted wholesale via
-    /// `abort_handles` when the peer session ends.
-    pub dispatch_handles: Mutex<Vec<JoinHandle<()>>>,
+    /// Handles to in-flight dispatch tasks plus a "closed" flag, guarded by a
+    /// single lock so `on_request`'s spawn-then-push can never race past
+    /// `abort_handles`'s set-then-drain. Without this, a write arriving via
+    /// the independent `CharacteristicWriteMethod::Fun` closure (gatt.rs)
+    /// could push a new handle after `abort_handles` has already drained the
+    /// vec, leaving it un-abortable and able to leak a late response onto
+    /// the shared notify channel for the *next* peer.
+    dispatch_state: Mutex<DispatchState>,
+}
+
+struct DispatchState {
+    closed: bool,
+    handles: Vec<JoinHandle<()>>,
 }
 
 impl<F: NetworkFacade + 'static> PeerSession<F> {
@@ -55,7 +64,10 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             notify_tx,
             model,
             mtu: AtomicUsize::new(MAX_FRAME_LEN),
-            dispatch_handles: Mutex::new(Vec::new()),
+            dispatch_state: Mutex::new(DispatchState {
+                closed: false,
+                handles: Vec::new(),
+            }),
         })
     }
 
@@ -90,11 +102,16 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().submit_auth(&tag)
     }
 
-    /// Aborts all in-flight dispatch tasks. Called when the peer session
-    /// ends (disconnect/resubscribe) so no stray task lingers past the
-    /// connection it was serving.
+    /// Aborts all in-flight dispatch tasks and marks the session closed so
+    /// any `on_request` call still in flight (racing this call via the
+    /// separate GATT write closure) aborts its own handle instead of
+    /// pushing it where it would never be seen again. Called when the peer
+    /// session ends (disconnect/resubscribe) so no stray task lingers past
+    /// the connection it was serving.
     pub fn abort_handles(&self) {
-        for h in self.dispatch_handles.lock().unwrap().drain(..) {
+        let mut state = self.dispatch_state.lock().unwrap();
+        state.closed = true;
+        for h in state.handles.drain(..) {
             h.abort();
         }
     }
@@ -164,9 +181,15 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                 }
             }
         });
-        let mut handles = self.dispatch_handles.lock().unwrap();
-        handles.retain(|h| !h.is_finished());
-        handles.push(handle);
+        let mut state = self.dispatch_state.lock().unwrap();
+        if state.closed {
+            // Lost the race with abort_handles: this session has already
+            // been torn down, so don't let the new task linger unseen.
+            handle.abort();
+            return;
+        }
+        state.handles.retain(|h| !h.is_finished());
+        state.handles.push(handle);
     }
 }
 
@@ -175,7 +198,7 @@ mod tests {
     use super::*;
     use crate::facade_mock::MockFacade;
     use crate::rate_limit::RateLimiter;
-    use netprov_protocol::{Op, Request, encode_request, fragment};
+    use netprov_protocol::{NONCE_LEN, Op, Request, encode_request, fragment, hmac_compute};
 
     fn new_peer() -> (Arc<PeerSession<MockFacade>>, NotifyRx) {
         let (notify_tx, notify_rx) = mpsc::unbounded_channel();
@@ -214,6 +237,52 @@ mod tests {
         assert!(
             notify_rx.try_recv().is_err(),
             "unauthenticated request must not produce a response"
+        );
+    }
+
+    /// Regression test for the abort_handles/on_request race: a write that
+    /// arrives via the independent GATT write closure (gatt.rs) *after*
+    /// abort_handles has already closed the session (the disconnect path in
+    /// server.rs) must not spawn a task that lingers unseen — it must abort
+    /// its own handle instead of pushing it. Without the `closed` flag
+    /// serialized under the same lock as the handle vec, this stray task
+    /// could later deliver a response frame to whichever peer connects next
+    /// on the shared notify channel.
+    #[tokio::test]
+    async fn request_after_abort_handles_does_not_leak_a_task() {
+        let (peer, mut notify_rx) = new_peer();
+
+        // Authenticate, as a real client would before writing a request.
+        let nonce_bytes = peer.on_nonce();
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&nonce_bytes);
+        let tag = hmac_compute(&[0x11u8; PSK_LEN], &nonce);
+        assert!(peer.on_auth(tag.to_vec()));
+
+        // Simulate the disconnect path: the peer session is torn down and
+        // all in-flight handles aborted *before* the stray write below
+        // arrives (mirrors server.rs calling peer.abort_handles() while the
+        // GATT write closure still holds the same Arc<PeerSession> via
+        // `current`).
+        peer.abort_handles();
+
+        let req = Request {
+            request_id: 9,
+            op: Op::ListInterfaces,
+        };
+        let bytes = encode_request(&req).unwrap();
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
+            peer.on_request(f);
+        }
+
+        assert!(
+            peer.dispatch_state.lock().unwrap().handles.is_empty(),
+            "a request racing abort_handles must not leave a dangling handle"
+        );
+        assert!(
+            notify_rx.try_recv().is_err(),
+            "a request racing abort_handles must not deliver a response \
+             onto the shared notify channel"
         );
     }
 }

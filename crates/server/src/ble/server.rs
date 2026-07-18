@@ -7,6 +7,7 @@ use crate::rate_limit::RateLimiter;
 use bluer::{
     Address, Session as BluerSession,
     adv::{Advertisement, Type as AdvType},
+    agent::Agent,
     gatt::local::CharacteristicControlEvent,
 };
 use futures_util::StreamExt;
@@ -159,6 +160,17 @@ where
     F: NetworkFacade + 'static,
 {
     let session = BluerSession::new().await?;
+
+    // The daemon runs headless (no display, no keyboard), so register a
+    // no-IO-capability agent: BlueZ negotiates Just Works pairing, which
+    // yields an encrypted link without any prompt but without MITM
+    // protection either. The app-layer HMAC challenge (crates/server/src/ble/conn.rs)
+    // is what actually authorizes commands; Just Works only satisfies the
+    // `encrypt_authenticated_*` flags set on the sensitive characteristics
+    // in gatt.rs. See README's security section for the residual-risk
+    // discussion.
+    let _agent_handle = session.register_agent(Agent::default()).await?;
+
     let adapter = match cfg.adapter_name.as_deref() {
         Some(n) => session.adapter(n)?,
         None => session.default_adapter().await?,

@@ -32,12 +32,21 @@ impl Clock for SystemClock {
     }
 }
 
+/// Global tier threshold is this multiple of the per-peer threshold.
+const GLOBAL_THRESHOLD_MULTIPLIER: u32 = 5;
+
+/// Backstop cap on the number of tracked peer entries.
+const MAX_PEER_ENTRIES: usize = 1024;
+
 pub struct RateLimiter<C: Clock = SystemClock> {
     cfg: RateLimiterConfig,
+    global_cfg: RateLimiterConfig,
     clock: C,
     state: std::sync::Mutex<HashMap<String, PeerState>>,
+    global: std::sync::Mutex<PeerState>,
 }
 
+#[derive(Default)]
 struct PeerState {
     failures: Vec<Instant>,
     locked_until: Option<Instant>,
@@ -55,21 +64,45 @@ impl RateLimiter<SystemClock> {
 }
 
 impl<C: Clock> RateLimiter<C> {
+    /// Global tier config defaults to the same window/lockout as the per-peer
+    /// tier, with a threshold `GLOBAL_THRESHOLD_MULTIPLIER` times higher.
     pub fn new(cfg: RateLimiterConfig, clock: C) -> Self {
+        let global_cfg = RateLimiterConfig {
+            threshold: cfg.threshold.saturating_mul(GLOBAL_THRESHOLD_MULTIPLIER),
+            window: cfg.window,
+            lockout: cfg.lockout,
+        };
+        Self::new_with_global(cfg, global_cfg, clock)
+    }
+
+    /// Like `new`, but with an explicit global-tier config (e.g. for tests).
+    pub fn new_with_global(cfg: RateLimiterConfig, global_cfg: RateLimiterConfig, clock: C) -> Self {
         Self {
             cfg,
+            global_cfg,
             clock,
             state: Default::default(),
+            global: std::sync::Mutex::new(PeerState::default()),
         }
     }
 
     pub fn check(&self, peer: &str) -> CheckResult {
         let now = self.clock.now();
+
+        let mut global = self.global.lock().unwrap();
+        if let Some(until) = global.locked_until {
+            if now < until {
+                return CheckResult::Locked {
+                    retry_after: until - now,
+                };
+            }
+            global.locked_until = None;
+            global.failures.clear();
+        }
+        drop(global);
+
         let mut map = self.state.lock().unwrap();
-        let e = map.entry(peer.to_string()).or_insert(PeerState {
-            failures: Vec::new(),
-            locked_until: None,
-        });
+        let e = map.entry(peer.to_string()).or_default();
         if let Some(until) = e.locked_until {
             if now < until {
                 return CheckResult::Locked {
@@ -82,29 +115,77 @@ impl<C: Clock> RateLimiter<C> {
         CheckResult::Allowed
     }
 
-    /// Record a failed auth attempt. Returns `true` if this triggered lockout.
+    /// Record a failed auth attempt. Returns `true` if this triggered lockout
+    /// on either the per-peer or global tier.
     pub fn record_failure(&self, peer: &str) -> bool {
         let now = self.clock.now();
-        let mut map = self.state.lock().unwrap();
-        let e = map.entry(peer.to_string()).or_insert(PeerState {
-            failures: Vec::new(),
-            locked_until: None,
-        });
-        // drop failures outside the window
-        let cutoff = now.checked_sub(self.cfg.window).unwrap_or(now);
-        e.failures.retain(|t| *t >= cutoff);
-        e.failures.push(now);
-        if e.failures.len() as u32 >= self.cfg.threshold {
-            e.locked_until = Some(now + self.cfg.lockout);
-            true
-        } else {
-            false
-        }
+
+        let peer_locked = {
+            let mut map = self.state.lock().unwrap();
+            let e = map.entry(peer.to_string()).or_default();
+            let cutoff = now.checked_sub(self.cfg.window).unwrap_or(now);
+            e.failures.retain(|t| *t >= cutoff);
+            e.failures.push(now);
+            if e.failures.len() as u32 >= self.cfg.threshold {
+                e.locked_until = Some(now + self.cfg.lockout);
+                true
+            } else {
+                false
+            }
+        };
+
+        self.prune_and_cap(now);
+
+        let global_locked = {
+            let mut g = self.global.lock().unwrap();
+            let cutoff = now.checked_sub(self.global_cfg.window).unwrap_or(now);
+            g.failures.retain(|t| *t >= cutoff);
+            g.failures.push(now);
+            if g.failures.len() as u32 >= self.global_cfg.threshold {
+                g.locked_until = Some(now + self.global_cfg.lockout);
+                true
+            } else {
+                false
+            }
+        };
+
+        peer_locked || global_locked
     }
 
     /// Clear failure history for a peer on successful auth.
     pub fn record_success(&self, peer: &str) {
         self.state.lock().unwrap().remove(peer);
+    }
+
+    /// Drop stale entries (expired lockout, no failures within the window),
+    /// then enforce `MAX_PEER_ENTRIES` by evicting the least-recently-active
+    /// entries as a backstop against unbounded growth from rotating peer ids.
+    fn prune_and_cap(&self, now: Instant) {
+        let mut map = self.state.lock().unwrap();
+        let cutoff = now.checked_sub(self.cfg.window).unwrap_or(now);
+        map.retain(|_, e| {
+            if e.locked_until.is_some_and(|until| now >= until) {
+                e.locked_until = None;
+                e.failures.clear();
+            }
+            e.failures.retain(|t| *t >= cutoff);
+            e.locked_until.is_some() || !e.failures.is_empty()
+        });
+
+        if map.len() > MAX_PEER_ENTRIES {
+            let mut by_activity: Vec<(String, Instant)> = map
+                .iter()
+                .map(|(k, e)| {
+                    let last = e.failures.last().copied().unwrap_or(cutoff);
+                    (k.clone(), last)
+                })
+                .collect();
+            by_activity.sort_by_key(|(_, t)| *t);
+            let excess = map.len() - MAX_PEER_ENTRIES;
+            for (k, _) in by_activity.into_iter().take(excess) {
+                map.remove(&k);
+            }
+        }
     }
 }
 
@@ -182,6 +263,75 @@ mod tests {
         // advance past window
         r.clock.advance(Duration::from_secs(20));
         assert!(!r.record_failure("A")); // only 1 failure in current window
+    }
+
+    #[test]
+    fn rotating_peer_ids_hit_global_lockout() {
+        let clock = FakeClock::new();
+        // default global threshold = 5 * per-peer threshold (5) = 25
+        let r = RateLimiter::new(RateLimiterConfig::default(), clock);
+        for i in 0..24 {
+            let peer = format!("peer-{i}");
+            assert!(
+                !r.record_failure(&peer),
+                "peer {i} alone should stay well under the per-peer threshold"
+            );
+        }
+        // the 25th distinct peer failing once trips the global tier even
+        // though no single peer came close to the per-peer threshold.
+        assert!(r.record_failure("peer-24"));
+        assert!(matches!(r.check("peer-24"), CheckResult::Locked { .. }));
+        // a brand new, never-before-seen peer id is also locked out.
+        assert!(matches!(
+            r.check("never-seen-before"),
+            CheckResult::Locked { .. }
+        ));
+    }
+
+    #[test]
+    fn prunes_expired_entries() {
+        let clock = FakeClock::new();
+        let r = RateLimiter::new(
+            RateLimiterConfig {
+                threshold: 100, // high enough that nothing locks out here
+                window: Duration::from_secs(10),
+                lockout: Duration::from_secs(30),
+            },
+            clock,
+        );
+        for i in 0..10 {
+            r.record_failure(&format!("peer-{i}"));
+        }
+        assert_eq!(r.state.lock().unwrap().len(), 10);
+
+        // advance past the failure window; the next record_failure call
+        // triggers pruning, which should drop the now-empty stale entries.
+        r.clock.advance(Duration::from_secs(20));
+        r.record_failure("trigger");
+        assert_eq!(r.state.lock().unwrap().len(), 1);
+        assert!(r.state.lock().unwrap().contains_key("trigger"));
+    }
+
+    #[test]
+    fn caps_map_size_by_evicting_oldest() {
+        let clock = FakeClock::new();
+        let r = RateLimiter::new(
+            RateLimiterConfig {
+                threshold: 100_000, // never lock out; only exercise the cap
+                window: Duration::from_secs(3600),
+                lockout: Duration::from_secs(3600),
+            },
+            clock,
+        );
+        let total = MAX_PEER_ENTRIES + 10;
+        for i in 0..total {
+            r.record_failure(&format!("peer-{i}"));
+            r.clock.advance(Duration::from_millis(1));
+        }
+        let map = r.state.lock().unwrap();
+        assert_eq!(map.len(), MAX_PEER_ENTRIES);
+        assert!(!map.contains_key("peer-0"), "oldest entry should be evicted");
+        assert!(map.contains_key(&format!("peer-{}", total - 1)));
     }
 
     #[test]

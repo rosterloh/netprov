@@ -12,18 +12,16 @@ use bluer::{
 use futures_util::StreamExt;
 use netprov_protocol::{
     MAX_FRAME_LEN, MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
-    decode_response, encode_request, fragment, hmac_compute, parse_frame,
+    decode_response, encode_request, fragment, hmac_compute, parse_frame, uuids as proto_uuids,
 };
 use std::collections::HashSet;
 use std::time::Duration;
 
-// Must match crates/server/src/ble/uuids.rs.
-const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0eebc1ba_773d_4625_babf_5c6cafe82b30);
-const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(0xc4c47504_92f6_45d0_97b2_24c965499cf8);
-const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_925b_7dd4ec0aafb6);
-const AUTH_RESPONSE_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0xb78f3640_d56a_487b_b10e_f5dea9facf3c);
-const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
+const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::SERVICE_UUID);
+const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::INFO_UUID);
+const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CHALLENGE_UUID);
+const AUTH_RESPONSE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
+const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::REQUEST_UUID);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BleDevice {

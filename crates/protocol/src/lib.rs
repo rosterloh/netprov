@@ -7,6 +7,7 @@ pub mod error;
 pub mod framing;
 pub mod message;
 pub mod transport;
+pub mod uuids;
 
 pub use auth::*;
 pub use codec::*;

@@ -44,13 +44,15 @@ transmitted after the encrypted link and HMAC auth are both established. The
 Info characteristic (model + protocol version only, per spec §11) stays
 unauthenticated and unencrypted.
 
-Three Rust crates in one workspace:
+Five Rust crates in one workspace:
 
 | Crate | Role |
 |---|---|
 | `netprov-protocol` | Wire format: CBOR messages, framing, HMAC auth helpers. Transport-agnostic. |
 | `netprov-server` | `netprovd` daemon. BLE GATT driver, session state machine, `NetworkFacade` (mock + nmrs). |
+| `netprov-sdk` | Transport-agnostic `ProvisioningClient` trait plus BLE/TCP transport implementations, shared by the CLI and desktop app. |
 | `netprov-client` | `netprov` CLI. Connects over BLE (via `--ble-peer`) or TCP behind the `dev-tcp` feature. |
+| `netprov-app` | Dioxus desktop UI, gated behind the `desktop` feature. |
 
 ## Install (from deb)
 
@@ -58,7 +60,7 @@ Builds for `amd64` and `aarch64` are produced by CI as artifacts. On a target
 box:
 
 ```bash
-sudo dpkg -i netprov_0.1.0-1_arm64.deb
+sudo dpkg -i netprov_<version>_arm64.deb
 sudo netprovd keygen --install        # generate and install a production PSK
 sudo systemctl enable --now netprovd  # start at boot + now
 ```

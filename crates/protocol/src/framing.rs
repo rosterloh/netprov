@@ -5,7 +5,12 @@
 
 pub const FRAME_HEADER_LEN: usize = 5;
 pub const FRAME_FLAG_FIN: u8 = 0x01;
-pub const MAX_PAYLOAD_PER_FRAME: usize = 512 - FRAME_HEADER_LEN; // Web Bluetooth ceiling
+/// Upper bound on a single BLE notify/write value (Web Bluetooth ceiling).
+/// Real ATT MTUs negotiated by a given connection are usually smaller than
+/// this; callers should cap `fragment`'s `max_fragment` argument at the
+/// negotiated MTU and use this constant only as the ceiling.
+pub const MAX_FRAME_LEN: usize = 512;
+pub const MAX_PAYLOAD_PER_FRAME: usize = MAX_FRAME_LEN - FRAME_HEADER_LEN;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FramingError {

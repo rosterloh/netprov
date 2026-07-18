@@ -11,9 +11,8 @@ use bluer::{
 };
 use futures_util::StreamExt;
 use netprov_protocol::{
-    FRAME_HEADER_LEN, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, OpResult, Psk,
-    Reassembler, Request, Response, decode_response, encode_request, fragment, hmac_compute,
-    parse_frame,
+    MAX_FRAME_LEN, MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
+    decode_response, encode_request, fragment, hmac_compute, parse_frame,
 };
 use std::collections::HashSet;
 use std::time::Duration;
@@ -25,7 +24,6 @@ const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_
 const AUTH_RESPONSE_UUID: bluer::Uuid =
     bluer::Uuid::from_u128(0xb78f3640_d56a_487b_b10e_f5dea9facf3c);
 const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
-const BLE_FRAME_MAX_LEN: usize = MAX_PAYLOAD_PER_FRAME + FRAME_HEADER_LEN;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BleDevice {
@@ -189,9 +187,12 @@ impl ProvisioningClient for BleClient {
         self.next_id = self.next_id.wrapping_add(1);
         let bytes = encode_request(&Request { request_id: id, op })?;
 
-        // fragment() takes the total BLE value length; the payload constant
-        // excludes the 5-byte netprov frame header.
-        for f in fragment(id, &bytes, BLE_FRAME_MAX_LEN) {
+        // fragment() takes the total BLE value length. Cap it at the
+        // connection's negotiated MTU (from the notify reader acquired in
+        // connect()) so we don't write chunks a small-MTU central can't
+        // accept; MAX_FRAME_LEN remains the upper bound.
+        let max_fragment = self.notify.mtu().min(MAX_FRAME_LEN);
+        for f in fragment(id, &bytes, max_fragment) {
             self.request.write(&f).await?;
         }
 

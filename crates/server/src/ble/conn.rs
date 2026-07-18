@@ -8,10 +8,11 @@ use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use crate::session::{Session, dispatch};
 use netprov_protocol::{
-    InfoPayload, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, PROTOCOL_VERSION, PSK_LEN, ProtocolError,
+    InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE, PROTOCOL_VERSION, PSK_LEN, ProtocolError,
     Reassembler, Request, Response, TAG_LEN, decode_request, encode_response, fragment,
     parse_frame,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -28,6 +29,11 @@ pub struct PeerSession<F: NetworkFacade> {
     pub reassembler: Mutex<Reassembler>,
     pub notify_tx: NotifyTx,
     pub model: String,
+    /// Notify-side fragment ceiling, set from the `CharacteristicWriter`'s
+    /// negotiated MTU once the peer subscribes (see `run_ble_server`).
+    /// Defaults to `MAX_FRAME_LEN` so a response dispatched before subscribe
+    /// completes still fragments to a safe ceiling.
+    pub mtu: AtomicUsize,
     /// Handles to in-flight dispatch tasks. Kept only so they aren't detached;
     /// future hardening: abort on peer disconnect (currently we rely on
     /// tokio runtime shutdown to drop them).
@@ -48,8 +54,15 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             reassembler: Mutex::new(Reassembler::new(MAX_MESSAGE_SIZE)),
             notify_tx,
             model,
+            mtu: AtomicUsize::new(MAX_FRAME_LEN),
             dispatch_handles: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Sets the notify fragment ceiling, called once the peer subscribes and
+    /// the writer's negotiated MTU is known.
+    pub fn set_mtu(&self, mtu: usize) {
+        self.mtu.store(mtu, Ordering::Relaxed);
     }
 
     /// Info read handler — unauthenticated. Encodes a CBOR InfoPayload.
@@ -126,9 +139,11 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                     return;
                 }
             };
-            // fragment's third arg is total frame size (body + 5-byte header);
-            // MAX_PAYLOAD_PER_FRAME = 507, so +5 gives the 512-byte BLE ceiling.
-            let frames = fragment(resp.request_id, &bytes, MAX_PAYLOAD_PER_FRAME + 5);
+            // fragment's third arg is the total frame size (body + header),
+            // capped at the peer's negotiated notify MTU (falls back to
+            // MAX_FRAME_LEN until subscribe sets it).
+            let max_fragment = this.mtu.load(Ordering::Relaxed);
+            let frames = fragment(resp.request_id, &bytes, max_fragment);
             for f in frames {
                 if this.notify_tx.send(f).is_err() {
                     debug!("notify channel closed");

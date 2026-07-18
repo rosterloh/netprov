@@ -239,7 +239,7 @@ where
         match evt {
             CharacteristicControlEvent::Notify(notifier) => {
                 let addr = notifier.device_address();
-                get_or_create_peer(
+                let peer = get_or_create_peer(
                     &current,
                     addr,
                     psk,
@@ -248,8 +248,13 @@ where
                     &model,
                     &notify_tx,
                 );
+                // The writer's MTU is only known once the peer has
+                // subscribed; plumb it into the PeerSession so on_request's
+                // dispatch task fragments responses to what this connection
+                // actually negotiated instead of the 512-byte ceiling.
+                peer.set_mtu(notifier.mtu());
                 let peer_id = format!("{addr:?}");
-                info!(peer = %peer_id, "peer subscribed");
+                info!(peer = %peer_id, mtu = notifier.mtu(), "peer subscribed");
 
                 let mut notifier = notifier;
                 while let Some(frame) = notify_rx.recv().await {
@@ -279,7 +284,7 @@ mod tests {
     use super::*;
     use crate::facade_mock::MockFacade;
     use netprov_protocol::{
-        MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, Request, decode_response, encode_request, fragment,
+        MAX_FRAME_LEN, NONCE_LEN, Op, Request, decode_response, encode_request, fragment,
         hmac_compute, parse_frame,
     };
 
@@ -348,7 +353,7 @@ mod tests {
             op: Op::ListInterfaces,
         };
         let bytes = encode_request(&req).unwrap();
-        for f in fragment(req.request_id, &bytes, MAX_PAYLOAD_PER_FRAME + 5) {
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
             (handlers.on_request_write)(f);
         }
 

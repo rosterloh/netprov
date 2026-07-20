@@ -7,25 +7,21 @@ use crate::ops::{ProvisioningClient, SdkError};
 use async_trait::async_trait;
 use bluer::{
     Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
-    gatt::remote::Characteristic,
+    gatt::{CharacteristicReader, remote::Characteristic},
 };
 use futures_util::StreamExt;
 use netprov_protocol::{
-    FRAME_HEADER_LEN, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, NONCE_LEN, Op, OpResult, Psk,
-    Reassembler, Request, Response, decode_response, encode_request, fragment, hmac_compute,
-    parse_frame,
+    MAX_FRAME_LEN, MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
+    decode_response, encode_request, fragment, hmac_compute, parse_frame, uuids as proto_uuids,
 };
 use std::collections::HashSet;
 use std::time::Duration;
 
-// Must match crates/server/src/ble/uuids.rs.
-const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0eebc1ba_773d_4625_babf_5c6cafe82b30);
-const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(0xc4c47504_92f6_45d0_97b2_24c965499cf8);
-const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x0107c3c5_a56b_4283_925b_7dd4ec0aafb6);
-const AUTH_RESPONSE_UUID: bluer::Uuid =
-    bluer::Uuid::from_u128(0xb78f3640_d56a_487b_b10e_f5dea9facf3c);
-const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e);
-const BLE_FRAME_MAX_LEN: usize = MAX_PAYLOAD_PER_FRAME + FRAME_HEADER_LEN;
+const SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::SERVICE_UUID);
+const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::INFO_UUID);
+const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CHALLENGE_UUID);
+const AUTH_RESPONSE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
+const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::REQUEST_UUID);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BleDevice {
@@ -40,6 +36,7 @@ pub struct BleClient {
     challenge: Characteristic,
     auth: Characteristic,
     request: Characteristic,
+    notify: CharacteristicReader,
     next_id: u16,
 }
 
@@ -134,6 +131,15 @@ impl BleClient {
             }
         }
 
+        let request =
+            request.ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?;
+
+        // Subscribe once up front so the server mints a PeerSession (and the
+        // notify path is live) before authentication begins, and so no
+        // response fragment can arrive between separate per-request
+        // subscriptions.
+        let notify = request.notify_io().await?;
+
         Ok(Self {
             _device: device,
             info: info.ok_or_else(|| SdkError::Ble("INFO characteristic missing".into()))?,
@@ -141,8 +147,8 @@ impl BleClient {
                 .ok_or_else(|| SdkError::Ble("CHALLENGE characteristic missing".into()))?,
             auth: auth
                 .ok_or_else(|| SdkError::Ble("AUTH_RESPONSE characteristic missing".into()))?,
-            request: request
-                .ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?,
+            request,
+            notify,
             next_id: 1,
         })
     }
@@ -179,19 +185,19 @@ impl ProvisioningClient for BleClient {
         self.next_id = self.next_id.wrapping_add(1);
         let bytes = encode_request(&Request { request_id: id, op })?;
 
-        // Subscribe before sending so early response fragments cannot be lost.
-        let mut notify = self.request.notify_io().await?;
-
-        // fragment() takes the total BLE value length; the payload constant
-        // excludes the 5-byte netprov frame header.
-        for f in fragment(id, &bytes, BLE_FRAME_MAX_LEN) {
+        // fragment() takes the total BLE value length. Cap it at the
+        // connection's negotiated MTU (from the notify reader acquired in
+        // connect()) so we don't write chunks a small-MTU central can't
+        // accept; MAX_FRAME_LEN remains the upper bound.
+        let max_fragment = self.notify.mtu().min(MAX_FRAME_LEN);
+        for f in fragment(id, &bytes, max_fragment) {
             self.request.write(&f).await?;
         }
 
         let mut buf = vec![0u8; MAX_MESSAGE_SIZE];
         let mut reassembler = Reassembler::new(MAX_MESSAGE_SIZE);
         loop {
-            let n = tokio::io::AsyncReadExt::read(&mut notify, &mut buf).await?;
+            let n = tokio::io::AsyncReadExt::read(&mut self.notify, &mut buf).await?;
             if n == 0 {
                 return Err(SdkError::Ble("notify stream closed".into()));
             }

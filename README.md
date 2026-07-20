@@ -23,17 +23,36 @@ flowchart TD
         GATT --> Session --> Facade
     end
 
-    Client -->|"GATT over LE (bonded + app-layer HMAC auth)"| GATT
+    Client -->|"GATT over LE (Just Works-encrypted link + app-layer HMAC auth)"| GATT
     Facade -->|D-Bus| NM
 ```
 
-Three Rust crates in one workspace:
+**Security posture:** the sensitive characteristics (ChallengeNonce, AuthResponse,
+Request/Response — everything but Info) require an encrypted link
+(`encrypt_authenticated_read`/`encrypt_authenticated_write` in
+`crates/server/src/ble/gatt.rs`). Since `netprovd` runs headless with no display
+or keyboard, it registers a no-IO-capability `bluer::agent::Agent`
+(`crates/server/src/ble/server.rs`), so BlueZ negotiates Just Works pairing on
+first access. Just Works establishes encryption but provides no
+man-in-the-middle protection by itself; the app-layer HMAC challenge (keyed by
+the pre-shared PSK) is what actually authorizes commands, so an active MITM
+that completes Just Works pairing still cannot issue commands without the PSK.
+The residual risk is that an active MITM present *during* pairing could
+potentially observe traffic before authorization completes (e.g. the
+ChallengeNonce). Wi-Fi credentials (`Op::ConnectWifi`) are only ever
+transmitted after the encrypted link and HMAC auth are both established. The
+Info characteristic (model + protocol version only, per spec §11) stays
+unauthenticated and unencrypted.
+
+Five Rust crates in one workspace:
 
 | Crate | Role |
 |---|---|
 | `netprov-protocol` | Wire format: CBOR messages, framing, HMAC auth helpers. Transport-agnostic. |
 | `netprov-server` | `netprovd` daemon. BLE GATT driver, session state machine, `NetworkFacade` (mock + nmrs). |
+| `netprov-sdk` | Transport-agnostic `ProvisioningClient` trait plus BLE/TCP transport implementations, shared by the CLI and desktop app. |
 | `netprov-client` | `netprov` CLI. Connects over BLE (via `--ble-peer`) or TCP behind the `dev-tcp` feature. |
+| `netprov-app` | Dioxus desktop UI, gated behind the `desktop` feature. |
 
 ## Install (from deb)
 
@@ -41,7 +60,7 @@ Builds for `amd64` and `aarch64` are produced by CI as artifacts. On a target
 box:
 
 ```bash
-sudo dpkg -i netprov_0.1.0-1_arm64.deb
+sudo dpkg -i netprov_<version>_arm64.deb
 sudo netprovd keygen --install        # generate and install a production PSK
 sudo systemctl enable --now netprovd  # start at boot + now
 ```

@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Post-release hardening pass over the BLE auth and transport path, found during
+a codebase review.
+
+### Fixed
+
+- BLE session ordering: sensitive characteristics are no longer reachable
+  before authentication completes.
+- Link-layer encryption enforced on ChallengeNonce, AuthResponse, and
+  Request/Response characteristics (`encrypt_authenticated_read` /
+  `encrypt_authenticated_write` in `crates/server/src/ble/gatt.rs`).
+- MTU-aware fragmentation now respects the negotiated BLE MTU instead of a
+  fixed size.
+- Reassembly is gated on authentication, partial-message buffers are bounded,
+  and a peer-session handle leak on disconnect is fixed.
+- BLE service/characteristic UUIDs de-duplicated to a single source of truth.
+
+### Changed
+
+- Failed-auth rate limiter moved from a per-peer-only tier to an additional
+  global tier, bounding aggregate brute-force attempts across peers.
+
 ## [1.0.0] — 2026-04-24
 
 First tagged release. Implements the v1 goals of the

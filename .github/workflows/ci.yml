@@ -27,6 +27,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config bluez
 
+      - name: Install GTK deps (netprov-app)
+        if: matrix.runner == 'ubuntu-latest'
+        run: sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev pkg-config
+
       - name: Cache cargo
         uses: actions/cache@v6
         with:
@@ -48,8 +52,24 @@ jobs:
       - name: clippy (live-ble)
         run: cargo clippy -p netprov-server --features live-ble --all-targets -- -D warnings
 
+      - name: clippy (client ble)
+        run: cargo clippy -p netprov-client --features ble --all-targets -- -D warnings
+
+      - name: clippy (app desktop)
+        if: matrix.runner == 'ubuntu-latest'
+        run: cargo clippy -p netprov-app --features desktop --all-targets -- -D warnings
+
+      - name: install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: audit
+        run: cargo audit
+
       - name: test (default)
         run: cargo test --workspace
+
+      - name: test (live-ble)
+        run: cargo test -p netprov-server --features live-ble
 
       - name: build (live-ble)
         run: cargo build -p netprov-server --features live-ble
@@ -77,7 +97,7 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.runner }}-cargo-deb-${{ hashFiles('**/Cargo.lock') }}
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        uses: taiki-e/install-action@cargo-deb
       - name: Build release
         run: cargo build --release -p netprov-server --features live-ble,live-nm
       - name: Build deb

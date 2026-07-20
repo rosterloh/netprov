@@ -8,10 +8,11 @@ use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use crate::session::{Session, dispatch};
 use netprov_protocol::{
-    InfoPayload, MAX_MESSAGE_SIZE, MAX_PAYLOAD_PER_FRAME, PROTOCOL_VERSION, PSK_LEN, ProtocolError,
+    InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE, PROTOCOL_VERSION, PSK_LEN, ProtocolError,
     Reassembler, Request, Response, TAG_LEN, decode_request, encode_response, fragment,
     parse_frame,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -28,10 +29,24 @@ pub struct PeerSession<F: NetworkFacade> {
     pub reassembler: Mutex<Reassembler>,
     pub notify_tx: NotifyTx,
     pub model: String,
-    /// Handles to in-flight dispatch tasks. Kept only so they aren't detached;
-    /// future hardening: abort on peer disconnect (currently we rely on
-    /// tokio runtime shutdown to drop them).
-    pub dispatch_handles: Mutex<Vec<JoinHandle<()>>>,
+    /// Notify-side fragment ceiling, set from the `CharacteristicWriter`'s
+    /// negotiated MTU once the peer subscribes (see `run_ble_server`).
+    /// Defaults to `MAX_FRAME_LEN` so a response dispatched before subscribe
+    /// completes still fragments to a safe ceiling.
+    pub mtu: AtomicUsize,
+    /// Handles to in-flight dispatch tasks plus a "closed" flag, guarded by a
+    /// single lock so `on_request`'s spawn-then-push can never race past
+    /// `abort_handles`'s set-then-drain. Without this, a write arriving via
+    /// the independent `CharacteristicWriteMethod::Fun` closure (gatt.rs)
+    /// could push a new handle after `abort_handles` has already drained the
+    /// vec, leaving it un-abortable and able to leak a late response onto
+    /// the shared notify channel for the *next* peer.
+    dispatch_state: Mutex<DispatchState>,
+}
+
+struct DispatchState {
+    closed: bool,
+    handles: Vec<JoinHandle<()>>,
 }
 
 impl<F: NetworkFacade + 'static> PeerSession<F> {
@@ -48,8 +63,18 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             reassembler: Mutex::new(Reassembler::new(MAX_MESSAGE_SIZE)),
             notify_tx,
             model,
-            dispatch_handles: Mutex::new(Vec::new()),
+            mtu: AtomicUsize::new(MAX_FRAME_LEN),
+            dispatch_state: Mutex::new(DispatchState {
+                closed: false,
+                handles: Vec::new(),
+            }),
         })
+    }
+
+    /// Sets the notify fragment ceiling, called once the peer subscribes and
+    /// the writer's negotiated MTU is known.
+    pub fn set_mtu(&self, mtu: usize) {
+        self.mtu.store(mtu, Ordering::Relaxed);
     }
 
     /// Info read handler — unauthenticated. Encodes a CBOR InfoPayload.
@@ -77,9 +102,27 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().submit_auth(&tag)
     }
 
+    /// Aborts all in-flight dispatch tasks and marks the session closed so
+    /// any `on_request` call still in flight (racing this call via the
+    /// separate GATT write closure) aborts its own handle instead of
+    /// pushing it where it would never be seen again. Called when the peer
+    /// session ends (disconnect/resubscribe) so no stray task lingers past
+    /// the connection it was serving.
+    pub fn abort_handles(&self) {
+        let mut state = self.dispatch_state.lock().unwrap();
+        state.closed = true;
+        for h in state.handles.drain(..) {
+            h.abort();
+        }
+    }
+
     /// Request write handler — reassembles fragments, dispatches complete
     /// messages, emits fragmented responses back via notify_tx.
     pub fn on_request(self: &Arc<Self>, value: Vec<u8>) {
+        if !self.session.lock().unwrap().is_authenticated() {
+            warn!("dropping request frame from unauthenticated peer");
+            return;
+        }
         let parsed = match parse_frame(&value) {
             Ok(f) => f,
             Err(e) => {
@@ -126,9 +169,11 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                     return;
                 }
             };
-            // fragment's third arg is total frame size (body + 5-byte header);
-            // MAX_PAYLOAD_PER_FRAME = 507, so +5 gives the 512-byte BLE ceiling.
-            let frames = fragment(resp.request_id, &bytes, MAX_PAYLOAD_PER_FRAME + 5);
+            // fragment's third arg is the total frame size (body + header),
+            // capped at the peer's negotiated notify MTU (falls back to
+            // MAX_FRAME_LEN until subscribe sets it).
+            let max_fragment = this.mtu.load(Ordering::Relaxed);
+            let frames = fragment(resp.request_id, &bytes, max_fragment);
             for f in frames {
                 if this.notify_tx.send(f).is_err() {
                     debug!("notify channel closed");
@@ -136,6 +181,108 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
                 }
             }
         });
-        self.dispatch_handles.lock().unwrap().push(handle);
+        let mut state = self.dispatch_state.lock().unwrap();
+        if state.closed {
+            // Lost the race with abort_handles: this session has already
+            // been torn down, so don't let the new task linger unseen.
+            handle.abort();
+            return;
+        }
+        state.handles.retain(|h| !h.is_finished());
+        state.handles.push(handle);
+    }
+}
+
+#[cfg(all(test, feature = "mock"))]
+mod tests {
+    use super::*;
+    use crate::facade_mock::MockFacade;
+    use crate::rate_limit::RateLimiter;
+    use netprov_protocol::{NONCE_LEN, Op, Request, encode_request, fragment, hmac_compute};
+
+    fn new_peer() -> (Arc<PeerSession<MockFacade>>, NotifyRx) {
+        let (notify_tx, notify_rx) = mpsc::unbounded_channel();
+        let peer = PeerSession::new(
+            [0x11u8; PSK_LEN],
+            "peer".into(),
+            Arc::new(MockFacade::new()),
+            Arc::new(RateLimiter::with_defaults()),
+            "test-model".into(),
+            notify_tx,
+        );
+        (peer, notify_rx)
+    }
+
+    /// A request frame from an unauthenticated peer must be dropped before
+    /// it ever reaches the reassembler, and must not produce a response.
+    #[tokio::test]
+    async fn unauthenticated_request_leaves_no_reassembler_state() {
+        let (peer, mut notify_rx) = new_peer();
+        assert!(!peer.session.lock().unwrap().is_authenticated());
+
+        let req = Request {
+            request_id: 1,
+            op: Op::ListInterfaces,
+        };
+        let bytes = encode_request(&req).unwrap();
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
+            peer.on_request(f);
+        }
+
+        assert_eq!(
+            peer.reassembler.lock().unwrap().partial_count(),
+            0,
+            "unauthenticated frame must not create reassembler state"
+        );
+        assert!(
+            notify_rx.try_recv().is_err(),
+            "unauthenticated request must not produce a response"
+        );
+    }
+
+    /// Regression test for the abort_handles/on_request race: a write that
+    /// arrives via the independent GATT write closure (gatt.rs) *after*
+    /// abort_handles has already closed the session (the disconnect path in
+    /// server.rs) must not spawn a task that lingers unseen — it must abort
+    /// its own handle instead of pushing it. Without the `closed` flag
+    /// serialized under the same lock as the handle vec, this stray task
+    /// could later deliver a response frame to whichever peer connects next
+    /// on the shared notify channel.
+    #[tokio::test]
+    async fn request_after_abort_handles_does_not_leak_a_task() {
+        let (peer, mut notify_rx) = new_peer();
+
+        // Authenticate, as a real client would before writing a request.
+        let nonce_bytes = peer.on_nonce();
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&nonce_bytes);
+        let tag = hmac_compute(&[0x11u8; PSK_LEN], &nonce);
+        assert!(peer.on_auth(tag.to_vec()));
+
+        // Simulate the disconnect path: the peer session is torn down and
+        // all in-flight handles aborted *before* the stray write below
+        // arrives (mirrors server.rs calling peer.abort_handles() while the
+        // GATT write closure still holds the same Arc<PeerSession> via
+        // `current`).
+        peer.abort_handles();
+
+        let req = Request {
+            request_id: 9,
+            op: Op::ListInterfaces,
+        };
+        let bytes = encode_request(&req).unwrap();
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
+            peer.on_request(f);
+        }
+
+        assert!(
+            peer.dispatch_state.lock().unwrap().handles.is_empty(),
+            "a request racing abort_handles must not leave a dangling handle"
+        );
+        assert!(
+            notify_rx.try_recv().is_err(),
+            "a request racing abort_handles must not deliver a response \
+             onto the shared notify channel"
+        );
     }
 }

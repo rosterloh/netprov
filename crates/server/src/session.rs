@@ -108,7 +108,7 @@ impl<F: NetworkFacade> Session<F> {
         ) {
             return false;
         }
-        let (tag_len_ok, nonce) = match &self.state {
+        let (nonce_pending, nonce) = match &self.state {
             SessionAuthState::Unauthenticated {
                 pending_nonce: Some(n),
             } => (true, *n),
@@ -117,7 +117,7 @@ impl<F: NetworkFacade> Session<F> {
         self.state = SessionAuthState::Unauthenticated {
             pending_nonce: None,
         };
-        if !tag_len_ok {
+        if !nonce_pending {
             return false;
         }
         if hmac_verify(&self.psk, &nonce, tag) {

@@ -17,4 +17,7 @@ async-trait.workspace = true
 bluer = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "io-util"] }

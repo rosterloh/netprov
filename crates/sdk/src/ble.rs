@@ -3,7 +3,7 @@
 //! This module is Linux/BlueZ today through `bluer`. Android and iOS should
 //! add separate transport adapters behind the same SDK operation surface.
 
-use crate::ops::{ProvisioningClient, SdkError};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError};
 use async_trait::async_trait;
 use bluer::{
     Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
@@ -165,54 +165,84 @@ impl BleClient {
 #[async_trait]
 impl ProvisioningClient for BleClient {
     async fn authenticate(&mut self, psk: Psk) -> Result<(), SdkError> {
-        // Read Info first to confirm the service is responsive. Protocol
-        // compatibility checks can be added here once the UI exposes versions.
-        let _info = self.info.read().await?;
+        // The reads below can block indefinitely on an unresponsive peer, so
+        // bound the whole exchange with the client deadline.
+        tokio::time::timeout(CLIENT_TIMEOUT, async {
+            // Read Info first to confirm the service is responsive. Protocol
+            // compatibility checks can be added here once the UI exposes
+            // versions.
+            let _info = self.info.read().await?;
 
-        let nonce = self.challenge.read().await?;
-        if nonce.len() != NONCE_LEN {
-            return Err(SdkError::UnexpectedMessage("nonce length"));
-        }
-        let mut n = [0u8; NONCE_LEN];
-        n.copy_from_slice(&nonce);
-        let tag = hmac_compute(&psk, &n);
-        self.auth.write(&tag).await?;
-        Ok(())
+            let nonce = self.challenge.read().await?;
+            if nonce.len() != NONCE_LEN {
+                return Err(SdkError::UnexpectedMessage("nonce length"));
+            }
+            let mut n = [0u8; NONCE_LEN];
+            n.copy_from_slice(&nonce);
+            let tag = hmac_compute(&psk, &n);
+            // The server rejects a bad tag with a GATT NotAuthorized error;
+            // surface that as AuthFailed (matching the TCP path) so the UI can
+            // print "auth failed — check the PSK" rather than a raw D-Bus
+            // string. Other write errors pass through as transport failures.
+            self.auth.write(&tag).await.map_err(map_auth_write_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| SdkError::Timeout(CLIENT_TIMEOUT))?
     }
 
     async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        let bytes = encode_request(&Request { request_id: id, op })?;
+        // The notify read loop has no natural deadline (a dropped response or
+        // silent disconnect never wakes it), so bound the round trip.
+        tokio::time::timeout(CLIENT_TIMEOUT, async {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            let bytes = encode_request(&Request { request_id: id, op })?;
 
-        // fragment() takes the total BLE value length. Cap it at the
-        // connection's negotiated MTU (from the notify reader acquired in
-        // connect()) so we don't write chunks a small-MTU central can't
-        // accept; MAX_FRAME_LEN remains the upper bound.
-        let max_fragment = self.notify.mtu().min(MAX_FRAME_LEN);
-        for f in fragment(id, &bytes, max_fragment) {
-            self.request.write(&f).await?;
-        }
-
-        let mut buf = vec![0u8; MAX_MESSAGE_SIZE];
-        let mut reassembler = Reassembler::new(MAX_MESSAGE_SIZE);
-        loop {
-            let n = tokio::io::AsyncReadExt::read(&mut self.notify, &mut buf).await?;
-            if n == 0 {
-                return Err(SdkError::Ble("notify stream closed".into()));
+            // fragment() takes the total BLE value length. Cap it at the
+            // connection's negotiated MTU (from the notify reader acquired in
+            // connect()) so we don't write chunks a small-MTU central can't
+            // accept; MAX_FRAME_LEN remains the upper bound.
+            let max_fragment = self.notify.mtu().min(MAX_FRAME_LEN);
+            for f in fragment(id, &bytes, max_fragment) {
+                self.request.write(&f).await?;
             }
-            let parsed = parse_frame(&buf[..n])?;
-            if let Some(msg) = reassembler.push(parsed)? {
-                let resp: Response = decode_response(&msg)?;
-                if resp.request_id != id {
-                    return Err(SdkError::IdMismatch {
-                        expected: id,
-                        got: resp.request_id,
-                    });
+
+            let mut buf = vec![0u8; MAX_MESSAGE_SIZE];
+            let mut reassembler = Reassembler::new(MAX_MESSAGE_SIZE);
+            loop {
+                let n = tokio::io::AsyncReadExt::read(&mut self.notify, &mut buf).await?;
+                if n == 0 {
+                    return Err(SdkError::Ble("notify stream closed".into()));
                 }
-                return resp.result.map_err(Into::into);
+                let parsed = parse_frame(&buf[..n])?;
+                if let Some(msg) = reassembler.push(parsed)? {
+                    let resp: Response = decode_response(&msg)?;
+                    if resp.request_id != id {
+                        return Err(SdkError::IdMismatch {
+                            expected: id,
+                            got: resp.request_id,
+                        });
+                    }
+                    return resp.result.map_err(Into::into);
+                }
             }
-        }
+        })
+        .await
+        .map_err(|_| SdkError::Timeout(CLIENT_TIMEOUT))?
+    }
+}
+
+/// Maps a GATT auth-characteristic write failure to an `SdkError`. A server
+/// that rejects the auth tag replies with `ReqError::NotAuthorized`, which
+/// bluer surfaces as `ErrorKind::NotAuthorized`; treat that as a clean
+/// authentication failure so callers get `AuthFailed` instead of an opaque
+/// `Ble(..)` D-Bus string.
+fn map_auth_write_err(e: bluer::Error) -> SdkError {
+    if e.kind == bluer::ErrorKind::NotAuthorized {
+        SdkError::AuthFailed
+    } else {
+        SdkError::from(e)
     }
 }
 

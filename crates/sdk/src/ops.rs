@@ -3,6 +3,16 @@ use netprov_protocol::{
     CodecError, FramingError, Interface, IpConfig, Op, OpResult, ProtocolError, Psk, StaticIpv4,
     TransportError, WifiCredential, WifiNetwork, WifiStatus,
 };
+use std::time::Duration;
+
+/// Deadline for a single client request or authentication round trip.
+///
+/// The server bounds each operation at 30 s, so this sits just above that:
+/// long enough not to trip a slow-but-live operation, short enough to
+/// distinguish a hung or silently dropped reply from real progress. Without
+/// it a lost response (malformed frame, encode failure, peer disconnect)
+/// leaves the CLI and app blocked forever.
+pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
@@ -14,6 +24,8 @@ pub enum SdkError {
     Protocol(#[from] ProtocolError),
     #[error("authentication failed")]
     AuthFailed,
+    #[error("operation timed out after {0:?}")]
+    Timeout(Duration),
     #[error("unexpected server message: {0}")]
     UnexpectedMessage(&'static str),
     #[error("response id mismatch: expected {expected}, got {got}")]

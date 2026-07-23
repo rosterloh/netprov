@@ -337,14 +337,16 @@ mod tests {
     fn out_of_order_valid_fragments_still_reassemble() {
         // Guard must not reject legitimate out-of-order delivery within range.
         let mut r = Reassembler::new(4096);
-        assert!(r
-            .push(parse_frame(&encode_frame(1, 2, FRAME_FLAG_FIN, b"CC")).unwrap())
-            .unwrap()
-            .is_none());
-        assert!(r
-            .push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
-            .unwrap()
-            .is_none());
+        assert!(
+            r.push(parse_frame(&encode_frame(1, 2, FRAME_FLAG_FIN, b"CC")).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            r.push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
+                .unwrap()
+                .is_none()
+        );
         let out = r
             .push(parse_frame(&encode_frame(1, 1, 0, b"BB")).unwrap())
             .unwrap();

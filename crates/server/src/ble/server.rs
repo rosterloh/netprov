@@ -1,6 +1,6 @@
 //! BLE adapter initialization + per-peer connection fan-out.
 
-use super::conn::PeerSession;
+use super::conn::{NotifyRx, NotifyTx, PeerSession};
 use super::gatt::{GattHandlers, build_application};
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
@@ -8,6 +8,7 @@ use bluer::{
     Address, Session as BluerSession,
     adv::{Advertisement, Type as AdvType},
     agent::Agent,
+    gatt::CharacteristicWriter,
     gatt::local::CharacteristicControlEvent,
 };
 use futures_util::StreamExt;
@@ -33,12 +34,7 @@ type PeerTable<F> = Arc<std::sync::Mutex<Option<(String, Arc<PeerSession<F>>)>>>
 
 /// Return value of `build_gatt_handlers`: the shared peer table, the notify
 /// channel halves, and the wired-up `GattHandlers`.
-type BuiltHandlers<F> = (
-    PeerTable<F>,
-    mpsc::UnboundedSender<Vec<u8>>,
-    mpsc::UnboundedReceiver<Vec<u8>>,
-    GattHandlers,
-);
+type BuiltHandlers<F> = (PeerTable<F>, NotifyTx, NotifyRx, GattHandlers);
 
 /// Returns the `PeerSession` for `addr`, reusing the one already installed in
 /// `current` if it belongs to the same peer, or minting a fresh one
@@ -52,7 +48,7 @@ fn get_or_create_peer<F: NetworkFacade + 'static>(
     facade: &Arc<F>,
     rate_limiter: &Arc<RateLimiter>,
     model: &str,
-    notify_tx: &mpsc::UnboundedSender<Vec<u8>>,
+    notify_tx: &NotifyTx,
 ) -> Arc<PeerSession<F>> {
     let peer_id = format!("{addr:?}");
     let mut guard = current.lock().unwrap();
@@ -74,6 +70,26 @@ fn get_or_create_peer<F: NetworkFacade + 'static>(
     session
 }
 
+/// Ends a departing peer's session: aborts its in-flight dispatch tasks and
+/// clears the shared peer table — but only if `current` still refers to this
+/// peer. A newer peer may already have authenticated and installed its own
+/// session in `current` (the reconnect race in issue #13); clearing
+/// unconditionally would destroy that newer peer's authenticated session.
+fn end_peer_session<F: NetworkFacade + 'static>(
+    current: &PeerTable<F>,
+    peer_id: &str,
+    session: &Arc<PeerSession<F>>,
+) {
+    session.abort_handles();
+    let mut guard = current.lock().unwrap();
+    if let Some((cur_id, _)) = guard.as_ref()
+        && cur_id == peer_id
+    {
+        *guard = None;
+    }
+    info!(peer = %peer_id, "peer session ended");
+}
+
 /// Builds the `GattHandlers` wired to `get_or_create_peer`, plus the shared
 /// peer table and notify channel. Split out from `run_ble_server` so the
 /// read-nonce/write-auth/subscribe/write-request ordering can be exercised in
@@ -85,7 +101,7 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
     rate_limiter: Arc<RateLimiter>,
 ) -> BuiltHandlers<F> {
     let current: PeerTable<F> = Arc::new(Default::default());
-    let (notify_tx, notify_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (notify_tx, notify_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
     let cur_info = current.clone();
     let cur_nonce = current.clone();
@@ -218,63 +234,108 @@ where
     // Readiness signal to systemd (or the caller).
     ready_cb();
 
-    // Drive the notify control stream: when a peer subscribes, reuse the
-    // already-minted PeerSession for that peer address (if the client
-    // authenticated before subscribing) or mint one now, and pipe notify_rx
-    // bytes into the writer.
+    // Drive three event sources in one `select!` so a peer's departure is
+    // observed promptly no matter how it happens:
     //
-    // Structural note: while we're blocked inside the inner recv() loop for
-    // peer A, the outer notify_control.next() is not polled. bluer buffers any
-    // Notify event for peer B in its stream. Peer B is therefore served only
-    // after peer A's loop exits — achieving serial single-peer semantics
-    // without any explicit gate.
+    //   * `notify_control.next()` — a new subscribe (or the stream ending).
+    //   * `active.closed()`       — the current peer unsubscribed/disconnected.
+    //   * `notify_rx.recv()`      — a response frame to write out.
+    //
+    // The previous design ran a nested `notify_rx.recv()` loop that only
+    // noticed a peer leaving when a notify *write* failed. A peer that
+    // vanished with no frame pending wedged the loop indefinitely, and the
+    // unconditional teardown that followed destroyed the *next* peer's
+    // authenticated session (issue #13). Watching `closed()` alongside the
+    // control stream fixes the wedge; `end_peer_session` (which only clears
+    // `current` when it still holds the departing peer) plus per-frame peer
+    // tagging fix the cross-peer teardown and frame leakage.
+    //
+    // Single-peer serial semantics (spec §7.5) still hold: `active` names the
+    // one subscribed peer, a new subscriber supersedes the old one, and
+    // `notify_rx` frames are delivered only to the peer that produced them.
+    let mut active: Option<(String, Arc<PeerSession<F>>, CharacteristicWriter)> = None;
     loop {
-        let evt = match notify_control.next().await {
-            Some(e) => e,
-            None => {
-                warn!("notify control stream ended — adapter lost");
-                return Ok(());
-            }
-        };
-        match evt {
-            CharacteristicControlEvent::Notify(notifier) => {
-                let addr = notifier.device_address();
-                let peer = get_or_create_peer(
-                    &current,
-                    addr,
-                    psk,
-                    &facade,
-                    &rate_limiter,
-                    &model,
-                    &notify_tx,
-                );
-                // The writer's MTU is only known once the peer has
-                // subscribed; plumb it into the PeerSession so on_request's
-                // dispatch task fragments responses to what this connection
-                // actually negotiated instead of the 512-byte ceiling.
-                peer.set_mtu(notifier.mtu());
-                let peer_id = format!("{addr:?}");
-                info!(peer = %peer_id, mtu = notifier.mtu(), "peer subscribed");
-
-                let mut notifier = notifier;
-                while let Some(frame) = notify_rx.recv().await {
-                    if let Err(e) = notifier.write_all(&frame).await {
-                        debug!(error = ?e, "notify write failed; peer likely gone");
-                        break;
+        tokio::select! {
+            evt = notify_control.next() => {
+                let evt = match evt {
+                    Some(e) => e,
+                    None => {
+                        warn!("notify control stream ended — adapter lost");
+                        return Ok(());
+                    }
+                };
+                match evt {
+                    CharacteristicControlEvent::Notify(notifier) => {
+                        let addr = notifier.device_address();
+                        let peer_id = format!("{addr:?}");
+                        // A different peer subscribing supersedes the current
+                        // one; tear the old session down first. If the same
+                        // peer re-subscribes, keep its session (get_or_create
+                        // reuses it) so a re-subscribe doesn't drop auth.
+                        if let Some((prev_id, prev_session, _prev_writer)) = active.take()
+                            && prev_id != peer_id
+                        {
+                            end_peer_session(&current, &prev_id, &prev_session);
+                        }
+                        let peer = get_or_create_peer(
+                            &current, addr, psk, &facade, &rate_limiter, &model, &notify_tx,
+                        );
+                        // The writer's MTU is only known once the peer has
+                        // subscribed; plumb it into the PeerSession so
+                        // on_request's dispatch fragments responses to what this
+                        // connection negotiated instead of the 512-byte ceiling.
+                        peer.set_mtu(notifier.mtu());
+                        info!(peer = %peer_id, mtu = notifier.mtu(), "peer subscribed");
+                        active = Some((peer_id, peer, notifier));
+                    }
+                    CharacteristicControlEvent::Write(_) => {
+                        // Writes are handled by the CharacteristicWriteMethod::Fun
+                        // closure in gatt.rs; ignore here.
                     }
                 }
-                // Drain any frames queued by this peer's dispatch tasks before
-                // a new peer connects. Without this, a slow WifiScan completing
-                // after disconnect would be delivered to the next peer (§7.5
-                // single-peer serial semantics).
-                while notify_rx.try_recv().is_ok() {}
-                peer.abort_handles();
-                *current.lock().unwrap() = None;
-                info!(peer = %peer_id, "peer session ended");
             }
-            CharacteristicControlEvent::Write(_) => {
-                // Writes are already handled by the CharacteristicWriteMethod::Fun
-                // closure in gatt.rs; ignore here.
+
+            // Resolves when the active peer stops its notification session
+            // (clean unsubscribe or link loss). Parks forever while no peer is
+            // subscribed so this branch never busy-loops.
+            res = async {
+                match active.as_ref() {
+                    Some((_, _, writer)) => writer.closed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some((gone_id, gone_session, _)) = active.take() {
+                    match res {
+                        Ok(()) => info!(peer = %gone_id, "peer unsubscribed"),
+                        Err(e) => debug!(error = ?e, peer = %gone_id, "notify session closed"),
+                    }
+                    end_peer_session(&current, &gone_id, &gone_session);
+                }
+            }
+
+            msg = notify_rx.recv() => {
+                let Some((frame_peer, frame)) = msg else {
+                    // Unreachable while we hold `notify_tx`, but don't spin.
+                    warn!("notify channel closed");
+                    return Ok(());
+                };
+                // Deliver only to the peer that produced the frame; a frame
+                // from a peer that has since departed is dropped so it never
+                // leaks onto a different peer's stream (issue #13).
+                if !matches!(&active, Some((id, _, _)) if *id == frame_peer) {
+                    debug!(peer = %frame_peer, "dropping notify frame for inactive peer");
+                    continue;
+                }
+                let write_result = {
+                    let (_, _, writer) = active.as_mut().expect("active matched above");
+                    writer.write_all(&frame).await
+                };
+                if let Err(e) = write_result {
+                    debug!(error = ?e, peer = %frame_peer, "notify write failed; peer likely gone");
+                    if let Some((gone_id, gone_session, _)) = active.take() {
+                        end_peer_session(&current, &gone_id, &gone_session);
+                    }
+                }
             }
         }
     }
@@ -361,7 +422,12 @@ mod tests {
         let mut reassembler =
             netprov_protocol::Reassembler::new(netprov_protocol::MAX_MESSAGE_SIZE);
         let resp = loop {
-            let frame = notify_rx.recv().await.expect("response frame expected");
+            let (frame_peer, frame) = notify_rx.recv().await.expect("response frame expected");
+            assert_eq!(
+                frame_peer,
+                format!("{addr:?}"),
+                "frame must be tagged with its peer"
+            );
             let parsed = parse_frame(&frame).unwrap();
             if let Some(msg) = reassembler.push(parsed).unwrap() {
                 break decode_response(&msg).unwrap();
@@ -372,6 +438,83 @@ mod tests {
             resp.result.is_ok(),
             "authenticated request should succeed: {:?}",
             resp.result
+        );
+    }
+
+    /// Core of issue #13: peer A departs *after* peer B has already
+    /// authenticated and installed its session in `current` (the reconnect
+    /// race). Tearing A's session down must not clear B's authenticated
+    /// session — `end_peer_session` only clears `current` when it still
+    /// refers to the departing peer.
+    #[test]
+    fn ending_departed_peer_preserves_newer_peers_session() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let (current, notify_tx, _notify_rx, _handlers) =
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+
+        let addr_a = Address::new([1, 2, 3, 4, 5, 6]);
+        let addr_b = Address::new([10, 11, 12, 13, 14, 15]);
+        let a_id = format!("{addr_a:?}");
+        let b_id = format!("{addr_b:?}");
+        assert_ne!(a_id, b_id);
+
+        // A subscribes → A's session lands in `current`.
+        let a = get_or_create_peer(
+            &current,
+            addr_a,
+            psk,
+            &facade,
+            &rate_limiter,
+            "m",
+            &notify_tx,
+        );
+        // B authenticates before A's departure is observed → B replaces
+        // `current`. A is now the departing peer whose loop hasn't yet seen
+        // the disconnect.
+        let _b = get_or_create_peer(
+            &current,
+            addr_b,
+            psk,
+            &facade,
+            &rate_limiter,
+            "m",
+            &notify_tx,
+        );
+
+        // A's belated teardown must leave B's session intact.
+        end_peer_session(&current, &a_id, &a);
+
+        let guard = current.lock().unwrap();
+        let (cur_id, _) = guard
+            .as_ref()
+            .expect("B's session must survive A's teardown");
+        assert_eq!(
+            *cur_id, b_id,
+            "ending departed peer A must not clear peer B"
+        );
+    }
+
+    /// Ending the peer that `current` still points at clears the table, so the
+    /// next peer starts from a clean slate.
+    #[test]
+    fn ending_active_peer_clears_current() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let (current, notify_tx, _notify_rx, _handlers) =
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+
+        let addr = Address::new([1, 2, 3, 4, 5, 6]);
+        let id = format!("{addr:?}");
+        let peer = get_or_create_peer(&current, addr, psk, &facade, &rate_limiter, "m", &notify_tx);
+
+        end_peer_session(&current, &id, &peer);
+
+        assert!(
+            current.lock().unwrap().is_none(),
+            "ending the peer held in `current` must clear it"
         );
     }
 }

@@ -20,15 +20,14 @@ cat <<'EOM'
 =========================================================================
 netprov installed.
 
+The shipped unit runs with NETPROV_PRODUCTION=1, so the daemon refuses
+to start without a real key (no embedded dev-key fallback).
+
 Before starting the service, install a production pre-shared key:
     sudo netprovd keygen --install
 
 Then enable and start the daemon:
     sudo systemctl enable --now netprovd
-
-To opt out of the embedded dev-key fallback in dev images, set
-    Environment=NETPROV_PRODUCTION=1
-in /etc/systemd/system/netprovd.service.d/override.conf.
 =========================================================================
 EOM
 

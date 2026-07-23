@@ -36,10 +36,10 @@ rand.workspace = true
 tokio-util.workspace = true
 ipnet = { workspace = true, features = ["serde"] }
 qrcode = "0.14.1"
-base64 = "0.22.1"
+base64 = "0.23.0"
 
 nmrs = { version = "3.0.1", optional = true }
-zbus = { version = "5.15.0", optional = true }
+zbus = { version = "5.18.0", optional = true }
 bluer = { workspace = true, optional = true }
 sd-notify = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }

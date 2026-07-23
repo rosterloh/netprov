@@ -33,10 +33,10 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tracing-journald = "0.3.2"
-async-trait = "0.1.89"
+async-trait = "0.1.91"
 clap = { version = "4.6.1", features = ["derive"] }
-hmac = "0.12.1"
-sha2 = "0.10.9"
+hmac = "0.13.0"
+sha2 = "0.11.0"
 subtle = "2.6.1"
 rand = "0.10.2"
 proptest = "1.11.0"

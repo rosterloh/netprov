@@ -1,4 +1,4 @@
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -11,7 +11,7 @@ pub type Nonce = [u8; NONCE_LEN];
 pub type Tag = [u8; TAG_LEN];
 
 pub fn hmac_compute(psk: &Psk, nonce: &Nonce) -> Tag {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(psk).expect("HMAC accepts any key len");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(psk).expect("HMAC accepts any key len");
     mac.update(nonce);
     let out = mac.finalize().into_bytes();
     let mut tag = [0u8; TAG_LEN];

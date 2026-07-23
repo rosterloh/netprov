@@ -70,8 +70,3 @@ assets = [
 conf-files = []
 maintainer-scripts = "packaging/debian/"
 features = ["live-ble", "live-nm"]
-
-[package.metadata.deb.systemd-units]
-unit-scripts = "packaging/"
-enable = false
-start = false

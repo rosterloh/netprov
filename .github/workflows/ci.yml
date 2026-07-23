@@ -75,8 +75,9 @@ jobs:
         run: cargo build -p netprov-server --features live-ble
 
   deb:
-    if: github.event_name == 'release'
     needs: test
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -98,8 +99,10 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.runner }}-cargo-deb-${{ hashFiles('**/Cargo.lock') }}
       - name: Install cargo-deb
         uses: taiki-e/install-action@cargo-deb
-      - name: Build release
+      - name: Build release (server)
         run: cargo build --release -p netprov-server --features live-ble,live-nm
+      - name: Build release (client, ble)
+        run: cargo build --release -p netprov-client --features ble
       - name: Build deb
         run: cargo deb -p netprov-server --no-build
       - name: Upload deb artifact
@@ -107,3 +110,8 @@ jobs:
         with:
           name: netprov-${{ matrix.runner }}
           path: target/debian/*.deb
+      - name: Attach deb to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" target/debian/*.deb --clobber

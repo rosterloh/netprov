@@ -123,6 +123,29 @@ impl Reassembler {
                 seq: f.seq,
             });
         }
+
+        // Contiguity guard: no fragment may carry a seq beyond the FIN. This
+        // rejects a stray high-seq fragment (whether it arrives before or
+        // after the FIN) and a FIN that lands below an already-buffered higher
+        // seq. Without it, a bogus fragment can make `frags.len()` match the
+        // expected count while the assembled bytes include data past FIN and
+        // silently omit a real fragment. The message is unrecoverable once
+        // this happens, so drop the partial to free its slot rather than let
+        // it linger for the life of the connection.
+        let effective_fin = if f.fin { Some(f.seq) } else { entry.fin_seq };
+        if let Some(fin_seq) = effective_fin {
+            let highest_buffered = entry.frags.keys().next_back().copied();
+            if f.seq > fin_seq || highest_buffered.is_some_and(|h| h > fin_seq) {
+                let got = entry.frags.len();
+                self.state.remove(&f.request_id);
+                return Err(FramingError::MissingFragments {
+                    request_id: f.request_id,
+                    got,
+                    fin_seq,
+                });
+            }
+        }
+
         entry.total_bytes += f.payload.len();
         if entry.total_bytes > self.max_message {
             self.state.remove(&f.request_id);
@@ -243,6 +266,93 @@ mod tests {
         assert_eq!(out.unwrap(), b"partial!");
     }
 
+    #[test]
+    fn stray_high_seq_before_fin_rejected() {
+        // Repro from issue #12: a stray fragment with seq > fin_seq must not
+        // be assembled into a "complete" message just because the count lines
+        // up. Previously this yielded Ok(Some(b"AABBXX")).
+        let mut r = Reassembler::new(4096);
+        r.push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
+            .unwrap();
+        r.push(parse_frame(&encode_frame(1, 5, 0, b"XX")).unwrap())
+            .unwrap(); // stray seq 5
+        let err = r
+            .push(parse_frame(&encode_frame(1, 2, FRAME_FLAG_FIN, b"BB")).unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FramingError::MissingFragments { fin_seq: 2, .. }
+        ));
+        // The unrecoverable partial is dropped, freeing its slot.
+        assert_eq!(r.partial_count(), 0);
+    }
+
+    #[test]
+    fn stray_high_seq_after_fin_rejected() {
+        // FIN establishes fin_seq=1; a later fragment with seq 5 must be
+        // rejected rather than buffered.
+        let mut r = Reassembler::new(4096);
+        r.push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
+            .unwrap();
+        r.push(parse_frame(&encode_frame(1, 1, FRAME_FLAG_FIN, b"BB")).unwrap())
+            .unwrap();
+        // With seqs {0,1} and fin_seq=1 the message already completed above,
+        // so start a fresh request to exercise the post-FIN stray path.
+        let mut r = Reassembler::new(4096);
+        r.push(parse_frame(&encode_frame(2, 0, 0, b"AA")).unwrap())
+            .unwrap();
+        r.push(parse_frame(&encode_frame(2, 2, FRAME_FLAG_FIN, b"CC")).unwrap())
+            .unwrap(); // fin_seq=2, still missing seq 1
+        let err = r
+            .push(parse_frame(&encode_frame(2, 5, 0, b"XX")).unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FramingError::MissingFragments { fin_seq: 2, .. }
+        ));
+        assert_eq!(r.partial_count(), 0);
+    }
+
+    #[test]
+    fn fin_below_buffered_seq_rejected() {
+        // Milder variant from issue #12: {seq 0, seq 5} then FIN at 1. The
+        // buffered seq 5 is beyond the declared FIN, so reject instead of
+        // letting the partial linger and permanently consume a slot.
+        let mut r = Reassembler::new(4096);
+        r.push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
+            .unwrap();
+        r.push(parse_frame(&encode_frame(1, 5, 0, b"XX")).unwrap())
+            .unwrap();
+        let err = r
+            .push(parse_frame(&encode_frame(1, 1, FRAME_FLAG_FIN, b"BB")).unwrap())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FramingError::MissingFragments { fin_seq: 1, .. }
+        ));
+        assert_eq!(r.partial_count(), 0);
+    }
+
+    #[test]
+    fn out_of_order_valid_fragments_still_reassemble() {
+        // Guard must not reject legitimate out-of-order delivery within range.
+        let mut r = Reassembler::new(4096);
+        assert!(
+            r.push(parse_frame(&encode_frame(1, 2, FRAME_FLAG_FIN, b"CC")).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            r.push(parse_frame(&encode_frame(1, 0, 0, b"AA")).unwrap())
+                .unwrap()
+                .is_none()
+        );
+        let out = r
+            .push(parse_frame(&encode_frame(1, 1, 0, b"BB")).unwrap())
+            .unwrap();
+        assert_eq!(out.unwrap(), b"AABBCC");
+    }
+
     use proptest::prelude::*;
 
     proptest! {
@@ -262,6 +372,72 @@ mod tests {
                 }
             }
             prop_assert_eq!(out.unwrap(), payload);
+        }
+
+        /// Reordered valid fragments must still reassemble to the exact
+        /// original payload, and whatever the Reassembler declares "complete"
+        /// must round-trip — never a corrupted concatenation.
+        #[test]
+        fn reordered_fragments_reassemble(
+            rid in any::<u16>(),
+            payload in proptest::collection::vec(any::<u8>(), 1..2000usize),
+            mtu in 16usize..512,
+            seed in any::<u64>(),
+        ) {
+            let mut frames = fragment(rid, &payload, mtu);
+            // Deterministic Fisher–Yates shuffle driven by the proptest seed.
+            let mut s = seed | 1;
+            for i in (1..frames.len()).rev() {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let j = (s as usize) % (i + 1);
+                frames.swap(i, j);
+            }
+            let mut r = Reassembler::new(1 << 20);
+            let mut out = None;
+            for f in &frames {
+                let parsed = parse_frame(f).unwrap();
+                if let Some(msg) = r.push(parsed).unwrap() {
+                    out = Some(msg);
+                }
+            }
+            prop_assert_eq!(out.unwrap(), payload);
+        }
+
+        /// Injecting a stray fragment whose seq is beyond the FIN must never
+        /// produce a "complete" message: either the injection is rejected, or
+        /// the genuine fragments still assemble to the correct payload. The
+        /// Reassembler must never return corrupt bytes.
+        #[test]
+        fn injected_high_seq_never_corrupts(
+            payload in proptest::collection::vec(any::<u8>(), 2..500usize),
+            mtu in 16usize..64,
+            stray in proptest::collection::vec(any::<u8>(), 1..8usize),
+        ) {
+            let rid = 7u16;
+            let frames = fragment(rid, &payload, mtu);
+            // Only meaningful when the payload spans multiple fragments so the
+            // FIN seq is > 0 and a "beyond FIN" seq exists.
+            prop_assume!(frames.len() >= 2);
+            let fin_seq = (frames.len() - 1) as u16;
+
+            let mut r = Reassembler::new(1 << 20);
+            // Feed everything except the FIN fragment.
+            for f in &frames[..frames.len() - 1] {
+                r.push(parse_frame(f).unwrap()).unwrap();
+            }
+            // Inject a stray fragment past the FIN seq.
+            let stray_frame = encode_frame(rid, fin_seq + 3, 0, &stray);
+            let _ = r.push(parse_frame(&stray_frame).unwrap());
+            // Deliver the real FIN.
+            let res = r.push(parse_frame(&frames[frames.len() - 1]).unwrap());
+            // If it claims completion, the bytes must be exactly the payload;
+            // rejecting the inconsistent state (Ok(None)/Err) is also fine.
+            // The Reassembler must never return corrupt bytes.
+            if let Ok(Some(msg)) = res {
+                prop_assert_eq!(msg, payload.clone());
+            }
         }
     }
 }

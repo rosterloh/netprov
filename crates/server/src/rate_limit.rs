@@ -76,7 +76,11 @@ impl<C: Clock> RateLimiter<C> {
     }
 
     /// Like `new`, but with an explicit global-tier config (e.g. for tests).
-    pub fn new_with_global(cfg: RateLimiterConfig, global_cfg: RateLimiterConfig, clock: C) -> Self {
+    pub fn new_with_global(
+        cfg: RateLimiterConfig,
+        global_cfg: RateLimiterConfig,
+        clock: C,
+    ) -> Self {
         Self {
             cfg,
             global_cfg,
@@ -328,7 +332,10 @@ mod tests {
         }
         let map = r.state.lock().unwrap();
         assert_eq!(map.len(), MAX_PEER_ENTRIES);
-        assert!(!map.contains_key("peer-0"), "oldest entry should be evicted");
+        assert!(
+            !map.contains_key("peer-0"),
+            "oldest entry should be evicted"
+        );
         assert!(map.contains_key(&format!("peer-{}", total - 1)));
     }
 

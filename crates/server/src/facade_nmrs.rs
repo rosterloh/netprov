@@ -289,7 +289,7 @@ impl NetworkFacade for NmrsFacade {
             let nameservers: Vec<u32> = ip4.get_property("Nameservers").await.unwrap_or_default();
             let dns = nameservers
                 .into_iter()
-                .map(|n| std::net::Ipv4Addr::from(n.to_le_bytes()))
+                .map(|n| std::net::Ipv4Addr::from(n.to_ne_bytes()))
                 .collect();
 
             Ok::<_, NetError>(IpConfig {
@@ -530,6 +530,7 @@ impl NetworkFacade for NmrsFacade {
                 "address-data".into(),
                 Value::from(addr_data).try_into().map_err(nm_err)?,
             );
+            ipv4.remove("addresses");
             if let Some(gw) = cfg.gateway {
                 ipv4.insert(
                     "gateway".into(),
@@ -538,15 +539,12 @@ impl NetworkFacade for NmrsFacade {
             } else {
                 ipv4.remove("gateway");
             }
-            // NM's legacy `dns` field: array of u32 in NETWORK byte order (big-endian host byte order
-            // interpretation on the wire, native byte order in D-Bus per NM docs — but in practice
-            // NM treats `a.b.c.d` as `((a<<24)|(b<<16)|(c<<8)|d)` written as `u32::from_be_bytes([a,b,c,d])`
-            // once ActivateConnection consumes the dict. Using little-endian flips the octets,
-            // so use big-endian here.)
+            // NM stores the legacy `ipv4.dns` u32 as the raw in_addr bytes reinterpreted in
+            // host byte order, matching the read path in get_ip_config.
             let dns_u32: Vec<u32> = cfg
                 .dns
                 .iter()
-                .map(|ip| u32::from_be_bytes(ip.octets()))
+                .map(|ip| u32::from_ne_bytes(ip.octets()))
                 .collect();
             ipv4.insert(
                 "dns".into(),
@@ -706,5 +704,42 @@ mod live_tests {
             .find(|i| matches!(i.iface_type, IfaceType::Ethernet))
             .expect("need at least one Ethernet interface");
         f.set_dhcp(&eth.name).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dns_encoding_tests {
+    use std::net::Ipv4Addr;
+
+    // Mirrors the encode/decode used in set_static_ipv4 and get_ip_config: NM's legacy
+    // `ipv4.dns` u32 is the raw in_addr bytes reinterpreted in host byte order, so both
+    // sides must use native-endian to round-trip correctly regardless of host endianness.
+    fn encode(ip: Ipv4Addr) -> u32 {
+        u32::from_ne_bytes(ip.octets())
+    }
+
+    fn decode(n: u32) -> Ipv4Addr {
+        Ipv4Addr::from(n.to_ne_bytes())
+    }
+
+    #[test]
+    fn dns_round_trips_through_native_endian_u32() {
+        let addrs = [
+            Ipv4Addr::new(8, 8, 4, 4),
+            Ipv4Addr::new(1, 0, 0, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+        ];
+        for ip in addrs {
+            assert_eq!(decode(encode(ip)), ip, "round-trip failed for {ip}");
+        }
+    }
+
+    #[test]
+    fn dns_encoding_does_not_flip_octets() {
+        // Regression test for #9: a big-endian encode paired with the existing
+        // little-endian decode silently reversed the octet order on LE hosts,
+        // turning 8.8.4.4 into 4.4.8.8.
+        let ip = Ipv4Addr::new(8, 8, 4, 4);
+        assert_eq!(decode(encode(ip)), ip);
     }
 }

@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+#[cfg(feature = "mock")]
+use netprov_server::MockFacade;
 #[cfg(feature = "live-ble")]
 use netprov_server::NmrsFacade;
 use netprov_server::keygen::{KeygenArgs, run_keygen};
@@ -6,8 +8,6 @@ use netprov_server::logging::{log_startup_banner, spawn_dev_key_warn_loop};
 #[cfg(feature = "mock")]
 use netprov_server::server_loop::run_tcp_server;
 use netprov_server::{LoadOptions, LoadedKey, RateLimiter, load_key};
-#[cfg(feature = "mock")]
-use netprov_server::MockFacade;
 #[cfg(feature = "live-ble")]
 use netprov_server::{
     ble::{BleServerConfig, run_ble_server},

@@ -12,7 +12,7 @@ members = [
 version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.97"
+rust-version = "1.94.1"
 authors = ["Richard Osterloh <richard.osterloh@gmail.com>"]
 
 [workspace.dependencies]

@@ -5,6 +5,7 @@ Requires=NetworkManager.service bluetooth.service
 
 [Service]
 Type=notify
+Environment=NETPROV_PRODUCTION=1
 ExecStart=/usr/bin/netprovd serve-ble
 Restart=on-failure
 RestartSec=5s

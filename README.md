@@ -66,12 +66,11 @@ sudo systemctl enable --now netprovd  # start at boot + now
 ```
 
 The deb does not auto-start — the admin must install a production key first.
-Running with the embedded dev key (the committed PSK under `packaging/`) logs
-a loud warning every 60 seconds.
-
-`NETPROV_PRODUCTION=1` in the unit's environment disables the dev-key
-fallback; the service refuses to start without a real key at
-`/etc/netprov/key`.
+`packaging/netprovd.service` ships with `NETPROV_PRODUCTION=1` set, so the
+daemon refuses to start without a real key at `/etc/netprov/key` rather than
+silently falling back to the embedded dev key (the committed PSK under
+`packaging/`, used only by `serve-tcp` for local dev/loopback tests, where it
+logs a loud warning every 60 seconds).
 
 ## Dev quickstart (no BLE, no NetworkManager)
 

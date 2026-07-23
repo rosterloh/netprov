@@ -27,6 +27,13 @@ a codebase review.
 - Failed-auth rate limiter moved from a per-peer-only tier to an additional
   global tier, bounding aggregate brute-force attempts across peers.
 
+### Security
+
+- `packaging/netprovd.service` now sets `Environment=NETPROV_PRODUCTION=1`,
+  so the shipped daemon refuses to start on a missing/unreadable
+  `/etc/netprov/key` instead of silently falling back to the public embedded
+  dev key. `serve-tcp` (dev/loopback) is unaffected. (#10)
+
 ## [1.0.0] — 2026-04-24
 
 First tagged release. Implements the v1 goals of the

@@ -423,7 +423,11 @@ mod tests {
             netprov_protocol::Reassembler::new(netprov_protocol::MAX_MESSAGE_SIZE);
         let resp = loop {
             let (frame_peer, frame) = notify_rx.recv().await.expect("response frame expected");
-            assert_eq!(frame_peer, format!("{addr:?}"), "frame must be tagged with its peer");
+            assert_eq!(
+                frame_peer,
+                format!("{addr:?}"),
+                "frame must be tagged with its peer"
+            );
             let parsed = parse_frame(&frame).unwrap();
             if let Some(msg) = reassembler.push(parsed).unwrap() {
                 break decode_response(&msg).unwrap();
@@ -458,21 +462,38 @@ mod tests {
 
         // A subscribes → A's session lands in `current`.
         let a = get_or_create_peer(
-            &current, addr_a, psk, &facade, &rate_limiter, "m", &notify_tx,
+            &current,
+            addr_a,
+            psk,
+            &facade,
+            &rate_limiter,
+            "m",
+            &notify_tx,
         );
         // B authenticates before A's departure is observed → B replaces
         // `current`. A is now the departing peer whose loop hasn't yet seen
         // the disconnect.
         let _b = get_or_create_peer(
-            &current, addr_b, psk, &facade, &rate_limiter, "m", &notify_tx,
+            &current,
+            addr_b,
+            psk,
+            &facade,
+            &rate_limiter,
+            "m",
+            &notify_tx,
         );
 
         // A's belated teardown must leave B's session intact.
         end_peer_session(&current, &a_id, &a);
 
         let guard = current.lock().unwrap();
-        let (cur_id, _) = guard.as_ref().expect("B's session must survive A's teardown");
-        assert_eq!(*cur_id, b_id, "ending departed peer A must not clear peer B");
+        let (cur_id, _) = guard
+            .as_ref()
+            .expect("B's session must survive A's teardown");
+        assert_eq!(
+            *cur_id, b_id,
+            "ending departed peer A must not clear peer B"
+        );
     }
 
     /// Ending the peer that `current` still points at clears the table, so the
@@ -487,9 +508,7 @@ mod tests {
 
         let addr = Address::new([1, 2, 3, 4, 5, 6]);
         let id = format!("{addr:?}");
-        let peer = get_or_create_peer(
-            &current, addr, psk, &facade, &rate_limiter, "m", &notify_tx,
-        );
+        let peer = get_or_create_peer(&current, addr, psk, &facade, &rate_limiter, "m", &notify_tx);
 
         end_peer_session(&current, &id, &peer);
 

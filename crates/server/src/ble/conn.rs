@@ -18,13 +18,20 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-/// Bytes that need to be written out on the Request/Response notify stream.
-/// Producer: PeerSession::on_request dispatch. Consumer: the notify-io writer
-/// owned by run_ble_server().
-pub type NotifyTx = mpsc::UnboundedSender<Vec<u8>>;
-pub type NotifyRx = mpsc::UnboundedReceiver<Vec<u8>>;
+/// Bytes that need to be written out on the Request/Response notify stream,
+/// tagged with the id of the peer that produced them. Producer:
+/// PeerSession::on_request dispatch. Consumer: the notify-io writer owned by
+/// run_ble_server(). The tag lets the writer drop frames from a peer that has
+/// since departed instead of leaking them onto the next peer's stream (see
+/// run_ble_server and issue #13).
+pub type NotifyTx = mpsc::UnboundedSender<(String, Vec<u8>)>;
+pub type NotifyRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
 
 pub struct PeerSession<F: NetworkFacade> {
+    /// Id of the peer this session serves (its BLE address, debug-formatted).
+    /// Frames pushed to `notify_tx` are tagged with this so the notify writer
+    /// can attribute — and drop — frames from a peer that has since departed.
+    pub peer_id: String,
     pub session: Mutex<Session<F>>,
     pub reassembler: Mutex<Reassembler>,
     pub notify_tx: NotifyTx,
@@ -59,6 +66,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         notify_tx: NotifyTx,
     ) -> Arc<Self> {
         Arc::new(Self {
+            peer_id: peer_id.clone(),
             session: Mutex::new(Session::new(psk, peer_id, facade, rate_limiter)),
             reassembler: Mutex::new(Reassembler::new(MAX_MESSAGE_SIZE)),
             notify_tx,
@@ -175,7 +183,9 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             let max_fragment = this.mtu.load(Ordering::Relaxed);
             let frames = fragment(resp.request_id, &bytes, max_fragment);
             for f in frames {
-                if this.notify_tx.send(f).is_err() {
+                // Tag each frame with this peer's id so the notify writer only
+                // delivers it while this peer is still the active subscriber.
+                if this.notify_tx.send((this.peer_id.clone(), f)).is_err() {
                     debug!("notify channel closed");
                     return;
                 }

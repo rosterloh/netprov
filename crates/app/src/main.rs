@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use netprov_protocol::{Interface, PSK_LEN, WifiStatus};
-use netprov_sdk::{BleClient, BleDevice, Netprov, parse_peer_address};
+use netprov_sdk::{BleClient, BleDevice, Netprov, PEER_ID_HINT, parse_peer_id};
 use std::time::Duration;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -25,10 +25,16 @@ enum ScanState {
     Failed(String),
 }
 
+/// One row in the device picker.
+///
+/// `id` is the opaque backend handle to connect with; `detail` is the
+/// human-facing second line — the MAC where the platform discloses one, and
+/// the handle itself on macOS, where it never does.
 #[derive(Clone, PartialEq)]
 struct DeviceSummary {
-    address: String,
-    name: Option<String>,
+    id: String,
+    label: String,
+    detail: String,
     rssi: Option<i16>,
 }
 
@@ -100,10 +106,10 @@ fn App() -> Element {
 
             section { class: "connection-panel",
                 label {
-                    span { "Peer address" }
+                    span { "Peer" }
                     input {
                         value: "{current_peer}",
-                        placeholder: "AA:BB:CC:DD:EE:FF",
+                        placeholder: "{PEER_ID_HINT}",
                         oninput: move |event| peer.set(event.value()),
                     }
                 }
@@ -137,7 +143,7 @@ fn App() -> Element {
                     devices: devices_view,
                     selected_peer: current_peer.clone(),
                     disabled: is_busy,
-                    onselect: move |address: String| peer.set(address),
+                    onselect: move |id: String| peer.set(id),
                 }
             }
 
@@ -216,29 +222,25 @@ fn DeviceList(
         div { class: "device-list",
             for device in devices {
                 {
-                    let selected = device.address == selected_peer;
+                    let selected = device.id == selected_peer;
                     let row_class = if selected {
                         "device-row selected"
                     } else {
                         "device-row"
                     };
-                    let name = device
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| "netprovd".to_string());
                     let signal = device
                         .rssi
                         .map(|rssi| format!("{rssi} dBm"))
                         .unwrap_or_else(|| "RSSI -".to_string());
-                    let address = device.address.clone();
+                    let id = device.id.clone();
                     rsx! {
                         button {
                             class: row_class,
                             disabled,
-                            onclick: move |_| onselect.call(address.clone()),
+                            onclick: move |_| onselect.call(id.clone()),
                             div {
-                                strong { "{name}" }
-                                span { "{device.address}" }
+                                strong { "{device.label}" }
+                                span { "{device.detail}" }
                             }
                             span { class: "device-signal", "{signal}" }
                         }
@@ -320,7 +322,7 @@ async fn scan_ble_devices() -> Result<Vec<DeviceSummary>, String> {
 
 async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot, String> {
     if peer.trim().is_empty() {
-        return Err("Peer address is required".into());
+        return Err("Peer identifier is required".into());
     }
 
     let key = tokio::fs::read(&key_path)
@@ -332,8 +334,8 @@ async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot,
     let mut psk = [0u8; PSK_LEN];
     psk.copy_from_slice(&key);
 
-    let addr = parse_peer_address(peer.trim()).map_err(|err| err.to_string())?;
-    let client = BleClient::connect(addr)
+    let peer_id = parse_peer_id(peer.trim()).map_err(|err| err.to_string())?;
+    let client = BleClient::connect(&peer_id)
         .await
         .map_err(|err| err.to_string())?;
     let mut netprov = Netprov::new(client);
@@ -356,8 +358,9 @@ async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot,
 impl From<BleDevice> for DeviceSummary {
     fn from(value: BleDevice) -> Self {
         Self {
-            address: value.address.to_string(),
-            name: value.name,
+            id: value.id.to_string(),
+            label: value.label().to_string(),
+            detail: value.detail().to_string(),
             rssi: value.rssi,
         }
     }

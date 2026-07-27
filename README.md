@@ -50,7 +50,7 @@ Five Rust crates in one workspace:
 |---|---|
 | `netprov-protocol` | Wire format: CBOR messages, framing, HMAC auth helpers. Transport-agnostic. |
 | `netprov-server` | `netprovd` daemon. BLE GATT driver, session state machine, `NetworkFacade` (mock + nmrs). |
-| `netprov-sdk` | Transport-agnostic `ProvisioningClient` trait plus BLE/TCP transport implementations, shared by the CLI and desktop app. |
+| `netprov-sdk` | Transport-agnostic `ProvisioningClient` trait plus BLE/TCP transport implementations, shared by the CLI and desktop app. BLE runs on Linux, macOS and Windows. |
 | `netprov-client` | `netprov` CLI. Connects over BLE (via `--ble-peer`) or TCP behind the `dev-tcp` feature. |
 | `netprov-app` | Dioxus desktop UI, gated behind the `desktop` feature. |
 
@@ -95,23 +95,66 @@ cargo run -p netprov-client --features dev-tcp --bin netprov -- \
 See [`packaging/SMOKE-TEST.md`](packaging/SMOKE-TEST.md) for the two-box
 hardware-in-the-loop runbook.
 
+## BLE clients on macOS and Windows
+
+`netprovd` is a GATT *peripheral* and stays Linux-only. The CLI and desktop
+app are pure GATT *centrals*, so they run anywhere: `netprov-sdk`'s `ble`
+feature selects `bluer` (BlueZ) on Linux and
+[`btleplug`](https://github.com/deviceplug/btleplug) (CoreBluetooth on macOS,
+WinRT on Windows) elsewhere. Nothing extra to enable — `--features ble` and
+`--features desktop` just work off-Linux now.
+
+One difference matters in practice: **macOS never tells applications a peer's
+MAC address.** CoreBluetooth hands out an opaque per-host `CBPeripheral` UUID
+instead, which is stable for that Mac and meaningless on any other. So
+`--ble-peer` takes an opaque identifier rather than a BD_ADDR. Discover it
+with the scan subcommand, which needs no PSK and no connection:
+
+```bash
+cargo run -p netprov-client --features ble --bin netprov -- ble-scan
+# 6E4A1B0C-9E3F-4A21-B0D4-7C2F1A8E55D9   netprovd-a1b2   -57 dBm
+
+cargo run -p netprov-client --features ble --bin netprov -- \
+  --key-path ./netprov-key.bin \
+  --ble-peer 6E4A1B0C-9E3F-4A21-B0D4-7C2F1A8E55D9 list
+```
+
+The advertised device name works as an identifier too (`--ble-peer
+netprovd-a1b2`), which is usually easier to type. On Linux and Windows the
+BD_ADDR still works as before.
+
+Two more macOS notes:
+
+- The first connection triggers a **system pairing prompt** — the Challenge,
+  AuthResponse and Request characteristics all require an encrypted link. A
+  terminal-launched CLI also needs Bluetooth permission granted to the
+  terminal app itself (System Settings → Privacy & Security → Bluetooth).
+- CoreBluetooth does not expose the negotiated ATT MTU, so the client
+  fragments requests at the mandatory 20-byte floor. That is correct but
+  chatty; set `NETPROV_BLE_MAX_FRAGMENT` to raise it if a peer is known to
+  negotiate more.
+
 ## Build matrix
 
 ```bash
 cargo test --workspace                                 # default: no BLE, no NM
 cargo build -p netprov-server --features live-ble      # + BLE GATT server
 cargo build -p netprov-server --features live-nm       # + real NetworkManager
+cargo build -p netprov-client --features ble           # CLI + BLE (any OS)
+cargo build -p netprov-client --features ble-btleplug  # force btleplug on Linux
 cargo deb -p netprov-server                            # build the .deb
 ```
 
 `live-ble` implies `live-nm` (production BLE needs NM). `live-nm-destructive`
 gates the mutating `NmrsFacade` integration tests that are unsafe to run in
-CI.
+CI. `ble-btleplug` forces the portable backend on Linux so the macOS code path
+stays covered by Linux CI and local builds.
 
 ## Desktop app dev setup
 
 The Dioxus desktop app is gated behind the `desktop` feature because it needs
-native GTK/WebKit development libraries on Linux. On Ubuntu/Debian:
+native GTK/WebKit development libraries on Linux. macOS needs no extra
+packages — WebKit and CoreBluetooth are part of the OS. On Ubuntu/Debian:
 
 ```bash
 sudo apt-get install -y \

@@ -20,8 +20,12 @@ pub struct Cli {
     #[arg(long, env = "NETPROV_ENDPOINT", default_value = "127.0.0.1:9600")]
     pub endpoint: String,
 
-    /// BLE peer BD_ADDR (e.g. AA:BB:CC:DD:EE:FF). If set, uses BLE transport
-    /// and requires `--features ble`.
+    /// BLE peer identifier. If set, uses BLE transport and requires
+    /// `--features ble`.
+    ///
+    /// On Linux this is the BD_ADDR (e.g. AA:BB:CC:DD:EE:FF). On macOS
+    /// CoreBluetooth never discloses peer MACs, so use the opaque handle or
+    /// the device name printed by `netprov ble-scan`.
     #[arg(long)]
     pub ble_peer: Option<String>,
 
@@ -31,6 +35,17 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Scan for nearby netprov devices and print their identifiers.
+    ///
+    /// Needs no PSK and no connection — it exists so you can discover the
+    /// value to pass to `--ble-peer`, which on macOS is not something you can
+    /// know in advance.
+    #[cfg(feature = "ble")]
+    BleScan {
+        /// Seconds to listen for advertisements.
+        #[arg(long, default_value_t = 8)]
+        timeout: u64,
+    },
     /// List network interfaces.
     List,
     /// Print IP config for an interface.

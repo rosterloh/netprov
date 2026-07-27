@@ -9,6 +9,31 @@ All notable changes to this project are documented in this file. Format follows
 Post-release hardening pass over the BLE auth and transport path, found during
 a codebase review.
 
+### Added
+
+- macOS (and Windows) BLE support for the client and desktop app, via a second
+  SDK transport backend built on `btleplug`. `netprov-sdk`'s `ble` feature now
+  picks `bluer` on Linux and `btleplug` (CoreBluetooth / WinRT) elsewhere, so
+  `cargo build -p netprov-app --features desktop` works on a Mac. `netprovd`
+  is unchanged and remains Linux-only. (#31)
+- `netprov ble-scan` — lists nearby netprov devices with the identifier to
+  pass to `--ble-peer`. Requires no PSK and no connection.
+- `netprov-sdk`/`netprov-client` feature `ble-btleplug`, forcing the portable
+  backend on Linux so the macOS code path is covered by Linux CI.
+- `NETPROV_BLE_MAX_FRAGMENT` overrides the per-frame BLE value length, for
+  platforms that do not report a negotiated ATT MTU.
+- CI: a macOS job building and testing the client, SDK and desktop app.
+
+### Changed
+
+- BLE peers are identified by an opaque `PeerId` rather than a BD_ADDR.
+  CoreBluetooth never discloses peer MAC addresses, so `--ble-peer` and the
+  app's peer field now accept a platform handle or the advertised device name;
+  a BD_ADDR still works wherever the platform provides one.
+- `netprov_sdk::parse_peer_address` is replaced by `parse_peer_id`, and
+  `BleDevice.address: bluer::Address` by `BleDevice.id: PeerId` plus an
+  optional `address: Option<String>`.
+
 ### Fixed
 
 - BLE session ordering: sensitive characteristics are no longer reachable

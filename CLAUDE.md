@@ -25,12 +25,32 @@ Much of the code is behind features, so a plain `cargo build`/`cargo test` does
 
 - `netprov-server`: `mock` (default), `live-nm` (real NetworkManager),
   `live-ble` (real BlueZ; implies `live-nm`), `live-nm-destructive`.
-- `netprov-client`: `ble`, `dev-tcp`, `loopback`.
+- `netprov-sdk`: `ble`, `ble-btleplug`, `dev-tcp`.
+- `netprov-client`: `ble`, `ble-btleplug`, `dev-tcp`, `loopback`.
 - `netprov-app`: `desktop`.
 
 The BLE server code (`crates/server/src/ble/**`) only compiles under
 `--features live-ble`, and its tests only run there — editing it and running
 `cargo test --workspace` alone will silently skip every BLE test.
+
+### Two BLE client backends
+
+`netprov-sdk`'s `ble` feature picks a backend by target, so callers just ask
+for `ble` and get whatever works there:
+
+| Target        | Backend    | Module                                    |
+| ------------- | ---------- | ----------------------------------------- |
+| Linux         | `bluer`    | `crates/sdk/src/ble/backend_bluez.rs`     |
+| macOS / other | `btleplug` | `crates/sdk/src/ble/backend_btleplug.rs`  |
+
+Only one compiles per target, so **on Linux `--features ble` never type-checks
+the btleplug backend**. Use `--features ble-btleplug` to force it and cover
+that code locally (CI does both). `netprovd` itself is a GATT peripheral and
+stays Linux/`bluer` only.
+
+Peers are identified by an opaque `PeerId`, not a MAC: CoreBluetooth never
+discloses peer BD_ADDRs, only a per-host `CBPeripheral` UUID. Do not
+reintroduce MAC assumptions into the SDK, CLI `--ble-peer`, or the app.
 
 ## Before pushing — run the full CI gate locally
 
@@ -51,11 +71,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p netprov-server --features live-nm  --all-targets -- -D warnings
 cargo clippy -p netprov-server --features live-ble --all-targets -- -D warnings
 cargo clippy -p netprov-client --features ble      --all-targets -- -D warnings
+cargo clippy -p netprov-client --features ble-btleplug --all-targets -- -D warnings
 cargo clippy -p netprov-app    --features desktop  --all-targets -- -D warnings
 
 # Test:
 cargo test --workspace
 cargo test -p netprov-server --features live-ble
+cargo test -p netprov-sdk    --features ble-btleplug
 
 # Build the BLE server (catches feature-gated compile errors clippy may miss):
 cargo build -p netprov-server --features live-ble

@@ -1,8 +1,9 @@
-//! BLE connector for app and CLI clients.
+//! Linux BLE central backend, over BlueZ via `bluer`.
 //!
-//! This module is Linux/BlueZ today through `bluer`. Android and iOS should
-//! add separate transport adapters behind the same SDK operation surface.
+//! This is the original (and still default) Linux path. Peers are identified
+//! by BD_ADDR, so [`PeerId`] round-trips through `bluer::Address`.
 
+use super::{BleDevice, PeerId, resolve_max_fragment};
 use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError};
 use async_trait::async_trait;
 use bluer::{
@@ -11,7 +12,7 @@ use bluer::{
 };
 use futures_util::StreamExt;
 use netprov_protocol::{
-    MAX_FRAME_LEN, MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
+    MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
     decode_response, encode_request, fragment, hmac_compute, parse_frame, uuids as proto_uuids,
 };
 use std::collections::HashSet;
@@ -23,11 +24,20 @@ const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CHALLENG
 const AUTH_RESPONSE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
 const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::REQUEST_UUID);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BleDevice {
-    pub address: Address,
-    pub name: Option<String>,
-    pub rssi: Option<i16>,
+/// Placeholder/help text for peer input on this backend.
+pub const PEER_ID_HINT: &str = "AA:BB:CC:DD:EE:FF";
+
+/// Validates user input as a BlueZ peer handle, i.e. a BD_ADDR.
+pub fn parse_peer_id(s: &str) -> Result<PeerId, SdkError> {
+    let addr = parse_peer_address(s.trim())?;
+    // Normalise through `Address` so a lowercase entry still matches the
+    // handles a scan produced.
+    Ok(PeerId::new(addr.to_string()))
+}
+
+fn parse_peer_address(s: &str) -> Result<Address, SdkError> {
+    s.parse()
+        .map_err(|e| SdkError::Ble(format!("invalid BD_ADDR {s}: {e}")))
 }
 
 pub struct BleClient {
@@ -78,7 +88,8 @@ impl BleClient {
         Ok(found)
     }
 
-    pub async fn connect(peer: Address) -> Result<Self, SdkError> {
+    pub async fn connect(peer: &PeerId) -> Result<Self, SdkError> {
+        let peer = parse_peer_address(peer.as_str())?;
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
         adapter.set_powered(true).await?;
@@ -203,7 +214,7 @@ impl ProvisioningClient for BleClient {
             // connection's negotiated MTU (from the notify reader acquired in
             // connect()) so we don't write chunks a small-MTU central can't
             // accept; MAX_FRAME_LEN remains the upper bound.
-            let max_fragment = self.notify.mtu().min(MAX_FRAME_LEN);
+            let max_fragment = resolve_max_fragment(self.notify.mtu());
             for f in fragment(id, &bytes, max_fragment) {
                 self.request.write(&f).await?;
             }
@@ -246,11 +257,6 @@ fn map_auth_write_err(e: bluer::Error) -> SdkError {
     }
 }
 
-pub fn parse_peer_address(s: &str) -> Result<Address, SdkError> {
-    s.parse()
-        .map_err(|e| SdkError::Ble(format!("invalid BD_ADDR {s}: {e}")))
-}
-
 async fn query_netprov_device(
     adapter: &Adapter,
     addr: Address,
@@ -270,19 +276,38 @@ async fn query_netprov_device(
     let rssi = device.rssi().await?;
 
     Ok(Some(BleDevice {
-        address: addr,
+        id: PeerId::new(addr.to_string()),
         name,
+        address: Some(addr.to_string()),
         rssi,
     }))
 }
 
 fn upsert_device(devices: &mut Vec<BleDevice>, device: BleDevice) {
-    if let Some(existing) = devices
-        .iter_mut()
-        .find(|existing| existing.address == device.address)
-    {
+    if let Some(existing) = devices.iter_mut().find(|existing| existing.id == device.id) {
         *existing = device;
     } else {
         devices.push(device);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_id_accepts_and_normalises_a_bd_addr() {
+        let id = parse_peer_id(" aa:bb:cc:dd:ee:ff ").unwrap();
+        // bluer renders addresses uppercase; normalising here means a
+        // lowercase CLI argument still equals the handle a scan produced.
+        assert_eq!(id.as_str(), "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn peer_id_rejects_a_non_mac() {
+        // A CoreBluetooth UUID pasted into the Linux client must fail loudly
+        // rather than reach BlueZ as a bogus address.
+        let err = parse_peer_id("6E4A1B0C-9E3F-4A21-B0D4-7C2F1A8E55D9").unwrap_err();
+        assert!(matches!(err, SdkError::Ble(msg) if msg.contains("invalid BD_ADDR")));
     }
 }

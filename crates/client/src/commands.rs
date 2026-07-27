@@ -8,6 +8,10 @@ where
     C: ProvisioningClient + Send,
 {
     match cmd {
+        // Handled in `main` before a transport is opened — a scan has no peer
+        // to dispatch to.
+        #[cfg(feature = "ble")]
+        Command::BleScan { .. } => bail!("ble-scan does not run over a connection"),
         Command::List => {
             let res = c.request(Op::ListInterfaces).await?;
             match res {

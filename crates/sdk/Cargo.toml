@@ -8,16 +8,28 @@ authors.workspace = true
 
 [features]
 default = []
-ble = ["dep:bluer", "dep:futures-util"]
+# Cross-platform BLE central transport. The backend is picked by target:
+# `bluer` (BlueZ) on Linux, `btleplug` (CoreBluetooth / WinRT) everywhere else.
+ble = ["dep:bluer", "dep:btleplug", "dep:uuid", "dep:futures-util"]
+# Force the btleplug backend on Linux too. Only useful for cross-backend
+# testing and CI coverage — the `bluer` path stays the Linux default.
+ble-btleplug = ["ble"]
 dev-tcp = []
 
 [dependencies]
 netprov-protocol = { path = "../protocol" }
 async-trait.workspace = true
-bluer = { workspace = true, optional = true }
+btleplug = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "time"] }
+
+# `bluer` is BlueZ-only: it uses AF_BLUETOOTH/SOL_BLUETOOTH/accept4, none of
+# which exist outside Linux. Keeping it target-scoped is what lets
+# `--features ble` resolve at all on macOS and Windows.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "io-util"] }

@@ -2,7 +2,10 @@ use crate::dto::*;
 use crate::error::ProtocolError;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// v2 made the auth handshake mutual: `AuthSubmit` carries the client nonce
+/// alongside its tag, and the server answers with a tag of its own. v1 peers
+/// are not wire-compatible.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Unauthenticated Info characteristic payload. Exposed pre-auth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,8 +69,10 @@ pub struct Response {
 pub enum Envelope {
     NonceRequest,
     NonceReply(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// Client nonce (`NONCE_LEN`) followed by the client tag (`TAG_LEN`).
     AuthSubmit(#[serde(with = "serde_bytes")] Vec<u8>),
-    AuthOk,
+    /// The server's own tag, proving it holds the PSK too.
+    AuthOk(#[serde(with = "serde_bytes")] Vec<u8>),
     AuthFail,
     Req(Request),
     Resp(Response),

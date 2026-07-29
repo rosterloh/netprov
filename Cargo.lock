@@ -3322,6 +3322,7 @@ dependencies = [
  "btleplug",
  "futures-util",
  "netprov-protocol",
+ "rand 0.10.2",
  "thiserror 2.0.18",
  "tokio",
  "uuid",

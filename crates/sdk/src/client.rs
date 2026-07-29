@@ -1,4 +1,4 @@
-use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError, random_nonce};
 use async_trait::async_trait;
 use netprov_protocol::*;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -71,10 +71,20 @@ where
                 Envelope::AuthFail => return Err(SdkError::AuthFailed),
                 _ => return Err(SdkError::UnexpectedMessage("expected NonceReply")),
             };
-            let tag = hmac_compute(&psk, &nonce);
-            self.send(Envelope::AuthSubmit(tag.to_vec())).await?;
+            let client_nonce = random_nonce();
+            let tag = client_tag(&psk, &nonce, &client_nonce);
+            self.send(Envelope::AuthSubmit(
+                auth_payload(&client_nonce, &tag).to_vec(),
+            ))
+            .await?;
             match self.recv().await? {
-                Envelope::AuthOk => {
+                // The server's tag proves it holds the PSK too. Without this
+                // check an impersonating peer would collect whatever the
+                // caller sends next, Wi-Fi credentials included.
+                Envelope::AuthOk(server) => {
+                    if !verify_server_tag(&psk, &nonce, &client_nonce, &server) {
+                        return Err(SdkError::ServerAuthFailed);
+                    }
                     self.authenticated = true;
                     Ok(())
                 }

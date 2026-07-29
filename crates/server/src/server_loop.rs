@@ -56,21 +56,25 @@ where
                     Envelope::NonceReply(nonce.to_vec())
                 }
             }
-            Envelope::AuthSubmit(tag) => {
-                if session.submit_auth(&tag) {
+            Envelope::AuthSubmit(payload) => match session.submit_auth(&payload) {
+                Some(tag) => {
                     info!(peer = %cfg.peer_id, "authenticated");
-                    Envelope::AuthOk
-                } else {
+                    Envelope::AuthOk(tag.to_vec())
+                }
+                None => {
                     warn!(peer = %cfg.peer_id, "auth failed");
                     Envelope::AuthFail
                 }
-            }
+            },
             Envelope::Req(req) => {
                 let resp = session.handle_request(req).await;
                 Envelope::Resp(resp)
             }
             // Client should never send these server-origin envelopes.
-            Envelope::NonceReply(_) | Envelope::AuthOk | Envelope::AuthFail | Envelope::Resp(_) => {
+            Envelope::NonceReply(_)
+            | Envelope::AuthOk(_)
+            | Envelope::AuthFail
+            | Envelope::Resp(_) => {
                 warn!("client sent server-origin envelope; closing");
                 return Ok(());
             }

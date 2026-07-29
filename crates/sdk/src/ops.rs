@@ -1,9 +1,20 @@
 use async_trait::async_trait;
 use netprov_protocol::{
-    CodecError, FramingError, Interface, IpConfig, Op, OpResult, ProtocolError, Psk, StaticIpv4,
-    TransportError, WifiCredential, WifiNetwork, WifiStatus,
+    CodecError, FramingError, Interface, IpConfig, NONCE_LEN, Nonce, Op, OpResult, ProtocolError,
+    Psk, StaticIpv4, TransportError, WifiCredential, WifiNetwork, WifiStatus,
 };
+use rand::Rng;
 use std::time::Duration;
+
+/// Fresh client nonce for the mutual auth handshake. A predictable nonce would
+/// let a recorded server tag be replayed, so this must stay a CSPRNG — same
+/// source the server uses to mint its own nonce.
+#[cfg(any(feature = "ble", feature = "dev-tcp"))]
+pub(crate) fn random_nonce() -> Nonce {
+    let mut nonce: Nonce = [0u8; NONCE_LEN];
+    rand::rng().fill_bytes(&mut nonce);
+    nonce
+}
 
 /// Deadline for a single client request or authentication round trip.
 ///
@@ -24,6 +35,8 @@ pub enum SdkError {
     Protocol(#[from] ProtocolError),
     #[error("authentication failed")]
     AuthFailed,
+    #[error("server failed to prove it holds the PSK — possible impersonation")]
+    ServerAuthFailed,
     #[error("operation timed out after {0:?}")]
     Timeout(Duration),
     #[error("unexpected server message: {0}")]

@@ -32,8 +32,19 @@ async fn main() -> Result<()> {
             use netprov_client::{BleClient, parse_peer_id};
             let peer = parse_peer_id(peer)?;
             let mut client = BleClient::connect(&peer).await?;
-            client.authenticate(psk).await?;
-            return dispatch(&mut client, cli.command).await;
+            let result = async {
+                client.authenticate(psk).await?;
+                dispatch(&mut client, cli.command).await
+            }
+            .await;
+            // Always drop the link, including on failure. A peripheral that
+            // stays connected stops advertising, which makes the next scan or
+            // connect intermittently find nothing (CoreBluetooth keeps the
+            // peripheral alive in the system daemon past process exit).
+            if let Err(e) = client.disconnect().await {
+                eprintln!("warning: could not disconnect cleanly: {e}");
+            }
+            return result;
         }
     }
     #[cfg(not(feature = "ble"))]

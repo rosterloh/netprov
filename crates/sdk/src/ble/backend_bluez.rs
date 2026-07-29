@@ -4,7 +4,7 @@
 //! by BD_ADDR, so [`PeerId`] round-trips through `bluer::Address`.
 
 use super::{BleDevice, PeerId, resolve_max_fragment};
-use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError, random_nonce};
 use async_trait::async_trait;
 use bluer::{
     Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
@@ -12,8 +12,9 @@ use bluer::{
 };
 use futures_util::StreamExt;
 use netprov_protocol::{
-    MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
-    decode_response, encode_request, fragment, hmac_compute, parse_frame, uuids as proto_uuids,
+    MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response, auth_payload,
+    client_tag, decode_response, encode_request, fragment, parse_frame, uuids as proto_uuids,
+    verify_server_tag,
 };
 use std::collections::HashSet;
 use std::time::Duration;
@@ -23,6 +24,10 @@ const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::INFO_UUID);
 const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CHALLENGE_UUID);
 const AUTH_RESPONSE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
 const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::REQUEST_UUID);
+
+/// Bound on the teardown. Short: it runs on the exit path, where the link is
+/// often already gone and there is nothing left to wait for.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Placeholder/help text for peer input on this backend.
 pub const PEER_ID_HINT: &str = "AA:BB:CC:DD:EE:FF";
@@ -41,7 +46,7 @@ fn parse_peer_address(s: &str) -> Result<Address, SdkError> {
 }
 
 pub struct BleClient {
-    _device: bluer::Device,
+    device: bluer::Device,
     info: Characteristic,
     challenge: Characteristic,
     auth: Characteristic,
@@ -152,7 +157,7 @@ impl BleClient {
         let notify = request.notify_io().await?;
 
         Ok(Self {
-            _device: device,
+            device,
             info: info.ok_or_else(|| SdkError::Ble("INFO characteristic missing".into()))?,
             challenge: challenge
                 .ok_or_else(|| SdkError::Ble("CHALLENGE characteristic missing".into()))?,
@@ -170,6 +175,20 @@ impl BleClient {
 
     pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
         <Self as ProvisioningClient>::request(self, op).await
+    }
+
+    /// Drops the link. BlueZ reference-counts the connection and releases it
+    /// when this object goes away, so this is belt-and-braces here — it exists
+    /// so callers can disconnect uniformly across backends, which the
+    /// CoreBluetooth path genuinely needs.
+    ///
+    /// Bounded for the same reason as the btleplug backend: it runs on the way
+    /// out of a failed session, and must not outlive the error it precedes.
+    pub async fn disconnect(&self) -> Result<(), SdkError> {
+        tokio::time::timeout(DISCONNECT_TIMEOUT, self.device.disconnect())
+            .await
+            .map_err(|_| SdkError::Timeout(DISCONNECT_TIMEOUT))??;
+        Ok(())
     }
 }
 
@@ -190,12 +209,23 @@ impl ProvisioningClient for BleClient {
             }
             let mut n = [0u8; NONCE_LEN];
             n.copy_from_slice(&nonce);
-            let tag = hmac_compute(&psk, &n);
+            let client_nonce = random_nonce();
+            let tag = client_tag(&psk, &n, &client_nonce);
             // The server rejects a bad tag with a GATT NotAuthorized error;
             // surface that as AuthFailed (matching the TCP path) so the UI can
             // print "auth failed — check the PSK" rather than a raw D-Bus
             // string. Other write errors pass through as transport failures.
-            self.auth.write(&tag).await.map_err(map_auth_write_err)?;
+            self.auth
+                .write(&auth_payload(&client_nonce, &tag))
+                .await
+                .map_err(map_auth_write_err)?;
+            // Read the server's own tag back off the same characteristic. Not
+            // optional: it is what distinguishes the real device from a peer
+            // that merely advertises the right service UUID.
+            let server = self.auth.read().await.map_err(map_auth_write_err)?;
+            if !verify_server_tag(&psk, &n, &client_nonce, &server) {
+                return Err(SdkError::ServerAuthFailed);
+            }
             Ok(())
         })
         .await

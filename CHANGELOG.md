@@ -36,11 +36,24 @@ a codebase review.
 
 ### Fixed
 
+- macOS: `--ble-peer <name>` stopped resolving after the first connection.
+  CoreBluetooth replaces its cached `local_name` with the peer's GATT device
+  name (a Pi reports its hostname), so the name `ble-scan` printed no longer
+  matched. Scans now prefer the advertised name, and both names resolve.
+- macOS: `ble-scan` and `connect` intermittently found nothing when run
+  shortly after a previous connection. The client never disconnected, and
+  CoreBluetooth keeps the peripheral connected in the system daemon past
+  process exit; a connected peripheral stops advertising. The CLI now
+  disconnects on exit, including on failure.
+- A peer refusing an operation for insufficient link security is reported as
+  such, instead of surfacing as `Device disconnected` (CoreBluetooth reports
+  the ATT error and drops the link ~2s later) or being misreported as a wrong
+  PSK.
 - BLE session ordering: sensitive characteristics are no longer reachable
   before authentication completes.
 - Link-layer encryption enforced on ChallengeNonce, AuthResponse, and
-  Request/Response characteristics (`encrypt_authenticated_read` /
-  `encrypt_authenticated_write` in `crates/server/src/ble/gatt.rs`).
+  Request/Response characteristics (`encrypt_read` / `encrypt_write` in
+  `crates/server/src/ble/gatt.rs`).
 - MTU-aware fragmentation now respects the negotiated BLE MTU instead of a
   fixed size.
 - Reassembly is gated on authentication, partial-message buffers are bounded,
@@ -53,6 +66,28 @@ a codebase review.
   global tier, bounding aggregate brute-force attempts across peers.
 
 ### Security
+
+- **The BLE auth handshake is now mutual, and the protocol version is 2.**
+  Previously only the client proved knowledge of the PSK; the server proved
+  nothing, so a peer that merely advertised the netprov service UUID could
+  have collected the Wi-Fi credentials a client sent next. `AuthResponse` now
+  carries the client's nonce alongside its tag, and the server answers with a
+  tag of its own that the client verifies before issuing any request. The two
+  tags are domain-separated (`netprov-auth-client-v2` / `-server-v2`) so
+  neither can be replayed as the other. v1 peers are not wire-compatible.
+- Sensitive characteristics ask for `encrypt_*` rather than
+  `encrypt_authenticated_*`. The authenticated variants are BlueZ's
+  `BT_SECURITY_HIGH` and require an MITM-protected LTK, which `netprovd`
+  cannot negotiate: it runs headless and registers a `NoInputNoOutput` agent,
+  so BlueZ can only do Just Works. The mismatch made every read of a sensitive
+  characteristic fail with "Encryption is insufficient" and the link drop
+  moments later — the BLE transport could not complete authentication on any
+  platform without an out-of-band `bluetoothctl` pairing. MITM protection is
+  now provided by the mutual handshake above, at the only layer that holds a
+  shared secret.
+- `Session::submit_auth` consumes the pending nonce before the rate-limit
+  check, so a nonce issued just before lockout no longer survives the whole
+  lockout window. (#19)
 
 - `packaging/netprovd.service` now sets `Environment=NETPROV_PRODUCTION=1`,
   so the shipped daemon refuses to start on a missing/unreadable

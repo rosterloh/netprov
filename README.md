@@ -29,20 +29,33 @@ flowchart TD
 
 **Security posture:** the sensitive characteristics (ChallengeNonce, AuthResponse,
 Request/Response — everything but Info) require an encrypted link
-(`encrypt_authenticated_read`/`encrypt_authenticated_write` in
-`crates/server/src/ble/gatt.rs`). Since `netprovd` runs headless with no display
-or keyboard, it registers a no-IO-capability `bluer::agent::Agent`
-(`crates/server/src/ble/server.rs`), so BlueZ negotiates Just Works pairing on
-first access. Just Works establishes encryption but provides no
-man-in-the-middle protection by itself; the app-layer HMAC challenge (keyed by
-the pre-shared PSK) is what actually authorizes commands, so an active MITM
-that completes Just Works pairing still cannot issue commands without the PSK.
-The residual risk is that an active MITM present *during* pairing could
-potentially observe traffic before authorization completes (e.g. the
-ChallengeNonce). Wi-Fi credentials (`Op::ConnectWifi`) are only ever
-transmitted after the encrypted link and HMAC auth are both established. The
-Info characteristic (model + protocol version only, per spec §11) stays
-unauthenticated and unencrypted.
+(`encrypt_read`/`encrypt_write` in `crates/server/src/ble/gatt.rs`). Since
+`netprovd` runs headless with no display or keyboard, it registers a
+no-IO-capability `bluer::agent::Agent` (`crates/server/src/ble/server.rs`), so
+BlueZ negotiates Just Works pairing on first access.
+
+Note the flags are deliberately **not** the `encrypt_authenticated_*` variants.
+Those are BlueZ's `BT_SECURITY_HIGH` and require an MITM-protected LTK, which
+Just Works cannot produce — a headless peripheral has no way to display or
+confirm a passkey, so with those flags set every read of a sensitive
+characteristic fails with "Encryption is insufficient" no matter how the
+pairing prompt is answered.
+
+MITM protection therefore comes from the application layer, which is the only
+layer holding a shared secret. The handshake is **mutual**: the server issues a
+nonce, the client returns its own nonce plus `HMAC(PSK, "client" ‖ Ns ‖ Nc)`,
+and the server — only after that verifies — answers with
+`HMAC(PSK, "server" ‖ Ns ‖ Nc)`, which the client checks before sending
+anything. The two tags are domain-separated so neither can be replayed as the
+other. An active MITM that completes Just Works pairing can therefore neither
+issue commands nor impersonate the device: it cannot produce the server tag, so
+the client aborts before Wi-Fi credentials (`Op::ConnectWifi`) are ever sent.
+
+The residual risk is confidentiality of the pre-auth exchange: an MITM present
+*during* pairing can observe traffic up to the point authorization completes
+(e.g. the ChallengeNonce, which is public by design). The Info characteristic
+(model + protocol version only, per spec §11) stays unauthenticated and
+unencrypted.
 
 Five Rust crates in one workspace:
 
@@ -126,9 +139,16 @@ BD_ADDR still works as before.
 Two more macOS notes:
 
 - The first connection triggers a **system pairing prompt** — the Challenge,
-  AuthResponse and Request characteristics all require an encrypted link. A
-  terminal-launched CLI also needs Bluetooth permission granted to the
-  terminal app itself (System Settings → Privacy & Security → Bluetooth).
+  AuthResponse and Request characteristics all require an encrypted link.
+  Accepting it is enough; the prompt has no passkey to compare, because Just
+  Works is all a headless peripheral can offer. A terminal-launched CLI also
+  needs Bluetooth permission granted to the terminal app itself
+  (System Settings → Privacy & Security → Bluetooth).
+- Prefer the identifier `ble-scan` prints over a remembered device name.
+  CoreBluetooth replaces its cached name with the peer's GATT device name after
+  the first connection (a Pi reports its hostname), so the advertised name is
+  not what a later `system_profiler` or Bluetooth-settings listing will show.
+  Both names resolve via `--ble-peer`, but the scan handle never changes.
 - CoreBluetooth does not expose the negotiated ATT MTU, so the client
   fragments requests at the mandatory 20-byte floor. That is correct but
   chatty; set `NETPROV_BLE_MAX_FRAGMENT` to raise it if a peer is known to

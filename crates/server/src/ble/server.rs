@@ -106,6 +106,7 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
     let cur_info = current.clone();
     let cur_nonce = current.clone();
     let cur_auth = current.clone();
+    let cur_auth_read = current.clone();
     let cur_req = current.clone();
     let facade_info = facade.clone();
     let facade_nonce = facade.clone();
@@ -156,6 +157,17 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
             )
             .on_auth(value)
         }),
+        // Deliberately does *not* mint a session: a read with no prior
+        // successful write has nothing to serve, and creating one here would
+        // discard the session that just authenticated.
+        on_auth_read: Arc::new(move |addr| {
+            let peer_id = format!("{addr:?}");
+            let guard = cur_auth_read.lock().unwrap();
+            match guard.as_ref() {
+                Some((id, p)) if *id == peer_id => p.on_auth_read(),
+                _ => None,
+            }
+        }),
         on_request_write: Arc::new(move |value| {
             if let Some((_, p)) = cur_req.lock().unwrap().as_ref() {
                 p.on_request(value);
@@ -180,11 +192,15 @@ where
     // The daemon runs headless (no display, no keyboard), so register a
     // no-IO-capability agent: BlueZ negotiates Just Works pairing, which
     // yields an encrypted link without any prompt but without MITM
-    // protection either. The app-layer HMAC challenge (crates/server/src/ble/conn.rs)
-    // is what actually authorizes commands; Just Works only satisfies the
-    // `encrypt_authenticated_*` flags set on the sensitive characteristics
-    // in gatt.rs. See README's security section for the residual-risk
-    // discussion.
+    // protection either.
+    //
+    // Just Works produces an *unauthenticated* LTK, which is why gatt.rs asks
+    // for `encrypt_*` and not `encrypt_authenticated_*` — the latter is
+    // BT_SECURITY_HIGH and unsatisfiable with this agent, so every read of a
+    // sensitive characteristic failed with "Encryption is insufficient".
+    // MITM protection comes from the mutual PSK handshake in session.rs
+    // instead: both sides prove they hold the key, so a relaying attacker
+    // cannot pose as the device. See README's security section.
     let _agent_handle = session.register_agent(Agent::default()).await?;
 
     let adapter = match cfg.adapter_name.as_deref() {
@@ -346,8 +362,8 @@ mod tests {
     use super::*;
     use crate::facade_mock::MockFacade;
     use netprov_protocol::{
-        MAX_FRAME_LEN, NONCE_LEN, Op, Request, decode_response, encode_request, fragment,
-        hmac_compute, parse_frame,
+        MAX_FRAME_LEN, NONCE_LEN, Op, Request, auth_payload, client_tag, decode_response,
+        encode_request, fragment, parse_frame, verify_server_tag,
     };
 
     /// Simulates the exact GATT interaction order the SDK's BleClient now
@@ -388,10 +404,16 @@ mod tests {
         let mut n = [0u8; NONCE_LEN];
         n.copy_from_slice(&nonce);
 
-        // 3. Write the HMAC auth tag.
-        let tag = hmac_compute(&psk, &n);
-        let authed = (handlers.on_auth_write)(addr, tag.to_vec());
+        // 3. Write the client nonce + tag, then read the server's tag back.
+        let client_nonce = [0x99u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
+        let authed = (handlers.on_auth_write)(addr, payload.to_vec());
         assert!(authed, "auth should succeed pre-subscribe");
+        let server = (handlers.on_auth_read)(addr).expect("server tag readable after auth");
+        assert!(
+            verify_server_tag(&psk, &n, &client_nonce, &server),
+            "server proof must verify pre-subscribe too"
+        );
 
         // 4. Subscribe: reuse the already-authenticated session rather than
         //    minting a fresh (unauthenticated) one.

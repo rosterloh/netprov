@@ -21,7 +21,7 @@
 //!    [`super::MAX_FRAGMENT_ENV`] says otherwise.
 
 use super::{ATT_HEADER_LEN, BleDevice, PeerId, resolve_max_fragment};
-use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError, random_nonce};
 use async_trait::async_trait;
 use btleplug::api::{
     BDAddr, Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
@@ -30,8 +30,9 @@ use btleplug::api::{
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures_util::{Stream, StreamExt};
 use netprov_protocol::{
-    MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response,
-    decode_response, encode_request, fragment, hmac_compute, parse_frame, uuids as proto_uuids,
+    MAX_MESSAGE_SIZE, NONCE_LEN, Op, OpResult, Psk, Reassembler, Request, Response, auth_payload,
+    client_tag, decode_response, encode_request, fragment, parse_frame, uuids as proto_uuids,
+    verify_server_tag,
 };
 use std::pin::Pin;
 use std::time::Duration;
@@ -50,6 +51,9 @@ const PEER_DISCOVERY_POLL: Duration = Duration::from_millis(200);
 /// Bound on the link-up and service-discovery steps individually, so a peer
 /// that accepts a connection but never completes discovery still fails fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Bound on the teardown. Short: it runs on the exit path, where the link is
+/// often already gone and there is nothing left to wait for.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Placeholder/help text for peer input on this backend.
 pub const PEER_ID_HINT: &str = "device name, or the handle printed by a scan";
@@ -168,6 +172,26 @@ impl BleClient {
     fn max_fragment(&self) -> usize {
         resolve_max_fragment((self.peripheral.mtu() as usize).saturating_sub(ATT_HEADER_LEN))
     }
+
+    /// Drops the link.
+    ///
+    /// Worth calling explicitly: unlike BlueZ, where the connection is
+    /// reference-counted and released when the D-Bus object goes away,
+    /// CoreBluetooth hands the peripheral to the system Bluetooth daemon,
+    /// which keeps it connected for a while after this process exits. A
+    /// peripheral that stays connected stops advertising, so the *next*
+    /// `ble-scan` or `connect` intermittently finds nothing at all.
+    ///
+    /// Bounded, because this is called on the way out of a failed session:
+    /// when the peer has already torn the link down, CoreBluetooth never
+    /// completes the request, and an unbounded wait here swallows the error
+    /// the caller was about to report.
+    pub async fn disconnect(&self) -> Result<(), SdkError> {
+        tokio::time::timeout(DISCONNECT_TIMEOUT, self.peripheral.disconnect())
+            .await
+            .map_err(|_| SdkError::Timeout(DISCONNECT_TIMEOUT))??;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -181,19 +205,42 @@ impl ProvisioningClient for BleClient {
             // versions.
             let _info = self.peripheral.read(&self.info).await?;
 
-            let nonce = self.peripheral.read(&self.challenge).await?;
+            // Mapped, not bare `?`: this is the first read that requires an
+            // encrypted link, so it is where a pairing/security-level problem
+            // shows up, and the raw error is an opaque disconnect.
+            let nonce = self
+                .peripheral
+                .read(&self.challenge)
+                .await
+                .map_err(map_auth_write_err)?;
             if nonce.len() != NONCE_LEN {
                 return Err(SdkError::UnexpectedMessage("nonce length"));
             }
             let mut n = [0u8; NONCE_LEN];
             n.copy_from_slice(&nonce);
-            let tag = hmac_compute(&psk, &n);
+            let client_nonce = random_nonce();
+            let tag = client_tag(&psk, &n, &client_nonce);
             // Must be a write *with response* — that is the only way the
             // server's NotAuthorized rejection reaches us at all.
             self.peripheral
-                .write(&self.auth, &tag, WriteType::WithResponse)
+                .write(
+                    &self.auth,
+                    &auth_payload(&client_nonce, &tag),
+                    WriteType::WithResponse,
+                )
                 .await
                 .map_err(map_auth_write_err)?;
+            // Read the server's own tag back off the same characteristic. Not
+            // optional: it is what distinguishes the real device from a peer
+            // that merely advertises the right service UUID.
+            let server = self
+                .peripheral
+                .read(&self.auth)
+                .await
+                .map_err(map_auth_write_err)?;
+            if !verify_server_tag(&psk, &n, &client_nonce, &server) {
+                return Err(SdkError::ServerAuthFailed);
+            }
             Ok(())
         })
         .await
@@ -275,14 +322,21 @@ fn write_type_for(characteristic: &Characteristic) -> WriteType {
 /// still passes through as a transport failure rather than being reported as
 /// a wrong PSK.
 fn map_auth_write_err(e: btleplug::Error) -> SdkError {
-    let authorization_denied = match &e {
-        btleplug::Error::PermissionDenied => true,
-        btleplug::Error::RuntimeError(msg) | btleplug::Error::NotSupported(msg) => {
-            looks_like_auth_rejection(msg)
-        }
-        other => looks_like_auth_rejection(&other.to_string()),
+    let text = match &e {
+        btleplug::Error::RuntimeError(msg) | btleplug::Error::NotSupported(msg) => msg.clone(),
+        other => other.to_string(),
     };
-    if authorization_denied {
+    // Check the security case first: "insufficient authentication" would
+    // otherwise be caught by the auth-rejection sniff and misreported as a
+    // wrong PSK.
+    if looks_like_insufficient_security(&text) {
+        return SdkError::Ble(format!(
+            "peer refused the operation because the link is not encrypted enough ({text}). \
+             The device and this host need to be paired — if you dismissed the system \
+             pairing prompt, forget the device in Bluetooth settings and reconnect."
+        ));
+    }
+    if matches!(e, btleplug::Error::PermissionDenied) || looks_like_auth_rejection(&text) {
         SdkError::AuthFailed
     } else {
         SdkError::from(e)
@@ -292,6 +346,21 @@ fn map_auth_write_err(e: btleplug::Error) -> SdkError {
 fn looks_like_auth_rejection(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
     lowered.contains("authoriz") || lowered.contains("authentic")
+}
+
+/// Whether the peer refused the operation because the link isn't encrypted
+/// enough (ATT 0x0F / 0x05) rather than because the PSK was wrong.
+///
+/// Worth distinguishing: CoreBluetooth reports this as "Encryption is
+/// insufficient." and then drops the link a couple of seconds later, so the
+/// bare symptom reaching the user was `Device disconnected` — which points at
+/// the radio when the real cause is a pairing/security-level mismatch.
+fn looks_like_insufficient_security(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("encryption is insufficient")
+        || lowered.contains("insufficient encryption")
+        || lowered.contains("insufficient authentication")
+        || lowered.contains("encryption required")
 }
 
 /// Scan only for peers advertising the netprov service. macOS *requires* a
@@ -327,14 +396,19 @@ async fn find_peer(adapter: &Adapter, peer: &PeerId) -> Result<Peripheral, SdkEr
             // Fall back to the bare handle if properties are unavailable
             // rather than abandoning the search: the handle alone is enough
             // to match a peer the user picked out of a previous scan.
-            let (address, name) = match peripheral.properties().await {
+            // Both name fields, because they diverge: after the first
+            // connection CoreBluetooth replaces `local_name` with the peer's
+            // GATT device name (a Pi reports its hostname), while
+            // `advertisement_name` keeps carrying the advertised name. Matching
+            // only one silently breaks a `--ble-peer <name>` that used to work.
+            let (address, names) = match peripheral.properties().await {
                 Ok(Some(props)) => (
                     disclosed_address(props.address),
-                    props.local_name.or(props.advertisement_name),
+                    [props.advertisement_name, props.local_name],
                 ),
-                _ => (disclosed_address(peripheral.address()), None),
+                _ => (disclosed_address(peripheral.address()), [None, None]),
             };
-            if peer_matches(peer, &id, address.as_deref(), name.as_deref()) {
+            if peer_matches(peer, &id, address.as_deref(), &names) {
                 return Ok(peripheral);
             }
         }
@@ -352,10 +426,15 @@ async fn find_peer(adapter: &Adapter, peer: &PeerId) -> Result<Peripheral, SdkEr
 /// Accepts the backend handle, the BD_ADDR where the platform discloses one,
 /// or the advertised name — so a MAC still works on Linux/Windows while macOS
 /// users can use the CoreBluetooth UUID or just the device name.
-fn peer_matches(peer: &PeerId, id: &str, address: Option<&str>, name: Option<&str>) -> bool {
+fn peer_matches(peer: &PeerId, id: &str, address: Option<&str>, names: &[Option<String>]) -> bool {
     let wanted = peer.as_str();
     let eq = |candidate: &str| candidate.eq_ignore_ascii_case(wanted);
-    eq(id) || address.is_some_and(eq) || name.is_some_and(|n| !n.is_empty() && eq(n))
+    eq(id)
+        || address.is_some_and(eq)
+        || names
+            .iter()
+            .flatten()
+            .any(|n| !n.is_empty() && eq(n.as_str()))
 }
 
 /// CoreBluetooth reports an all-zero MAC because it never discloses the real
@@ -381,9 +460,12 @@ async fn describe(peripheral: &Peripheral) -> Result<Option<BleDevice>, SdkError
 
     Ok(Some(BleDevice {
         id: PeerId::new(peripheral.id().to_string()),
+        // Advertised name first: `local_name` turns into the GATT device
+        // name once the peer has been connected to, so preferring it would
+        // make `ble-scan` print an identifier that changes after first use.
         name: props
-            .local_name
-            .or(props.advertisement_name)
+            .advertisement_name
+            .or(props.local_name)
             .filter(|value| !value.is_empty()),
         address: disclosed_address(props.address),
         rssi: props.rssi,
@@ -482,12 +564,13 @@ mod tests {
 
     #[test]
     fn peer_matches_handle_address_or_name() {
+        let name = |n: &str| [Some(n.to_string()), None];
         let by_handle = PeerId::new("6E4A1B0C-9E3F-4A21-B0D4-7C2F1A8E55D9");
         assert!(peer_matches(
             &by_handle,
             "6e4a1b0c-9e3f-4a21-b0d4-7c2f1a8e55d9",
             None,
-            Some("netprovd"),
+            &name("netprovd"),
         ));
 
         // A MAC still works wherever the platform discloses one.
@@ -496,7 +579,7 @@ mod tests {
             &by_mac,
             "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
             Some("AA:BB:CC:DD:EE:FF"),
-            None,
+            &[None, None],
         ));
 
         // ...and so does the advertised name, which is the only human-usable
@@ -506,11 +589,30 @@ mod tests {
             &by_name,
             "some-handle",
             None,
-            Some("netprovd")
+            &name("netprovd")
         ));
 
-        assert!(!peer_matches(&by_name, "some-handle", None, Some("other")));
-        assert!(!peer_matches(&by_name, "some-handle", None, None));
+        assert!(!peer_matches(&by_name, "some-handle", None, &name("other")));
+        assert!(!peer_matches(&by_name, "some-handle", None, &[None, None]));
+    }
+
+    /// After the first connection CoreBluetooth reports the peer's GATT device
+    /// name as `local_name` (a Pi answers with its hostname) while
+    /// `advertisement_name` still carries the advertised one. Both must match,
+    /// or a `--ble-peer <name>` that worked yesterday stops resolving today.
+    #[test]
+    fn either_name_field_matches() {
+        let peer = PeerId::new("netprovd-netprov-dev");
+        let after_connect = [
+            Some("netprovd-netprov-dev".to_string()), // advertisement_name
+            Some("raspberrypi5".to_string()),         // local_name
+        ];
+        assert!(peer_matches(&peer, "handle", None, &after_connect));
+
+        // The GATT device name resolves too, since that is what a user who
+        // only ever saw the post-connect name would type.
+        let by_hostname = PeerId::new("raspberrypi5");
+        assert!(peer_matches(&by_hostname, "handle", None, &after_connect));
     }
 
     #[test]
@@ -518,7 +620,12 @@ mod tests {
         // Several peers can advertise no name at once; an empty PeerId is
         // already rejected by parse_peer_id, but guard the match too.
         let peer = PeerId::new("");
-        assert!(!peer_matches(&peer, "handle", None, Some("")));
+        assert!(!peer_matches(
+            &peer,
+            "handle",
+            None,
+            &[Some(String::new()), None]
+        ));
     }
 
     #[test]
@@ -558,6 +665,27 @@ mod tests {
             map_auth_write_err(btleplug::Error::PermissionDenied),
             SdkError::AuthFailed
         ));
+    }
+
+    /// A link-security refusal is not a wrong PSK. CoreBluetooth reports it
+    /// then drops the connection, so before this the user saw only
+    /// "Device disconnected" and had no way to tell the two apart.
+    #[test]
+    fn insufficient_security_is_not_reported_as_auth_failure() {
+        for message in [
+            "Encryption is insufficient.",
+            "Insufficient Encryption",
+            "Insufficient Authentication",
+            "org.bluez.Error.Failed: Encryption required",
+        ] {
+            match map_auth_write_err(btleplug::Error::RuntimeError(message.into())) {
+                SdkError::Ble(text) => assert!(
+                    text.contains("not encrypted enough"),
+                    "unhelpful message for {message}: {text}"
+                ),
+                other => panic!("expected a link-security error for {message}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

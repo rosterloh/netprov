@@ -40,6 +40,16 @@ a codebase review.
   CoreBluetooth replaces its cached `local_name` with the peer's GATT device
   name (a Pi reports its hostname), so the name `ble-scan` printed no longer
   matched. Scans now prefer the advertised name, and both names resolve.
+- macOS: every request timed out after a successful session. CoreBluetooth
+  caches a characteristic's notify state across connections and answers
+  `subscribe` from that cache without writing the CCCD, so `netprovd` never saw
+  a new subscription and dropped each response with `dropping notify frame for
+  inactive peer`. The client now clears that state when it connects, which also
+  covers sessions the server ended (a rejected PSK drops the link, leaving
+  nothing to unsubscribe over).
+- A rejected PSK reported `Device disconnected` on macOS. The server errors the
+  `AuthResponse` write and drops the link, and CoreBluetooth discards the ATT
+  error behind the disconnect, so the client now names the likely cause.
 - macOS: `ble-scan` and `connect` intermittently found nothing when run
   shortly after a previous connection. The client never disconnected, and
   CoreBluetooth keeps the peripheral connected in the system daemon past
@@ -64,6 +74,16 @@ a codebase review.
 
 - Failed-auth rate limiter moved from a per-peer-only tier to an additional
   global tier, bounding aggregate brute-force attempts across peers.
+
+### Added
+
+- `netprovd` initiates bonding itself when a peer subscribes. The sensitive
+  characteristics need an encrypted link, but a central only discovers that by
+  failing a read: CoreBluetooth does raise its pairing prompt at that point,
+  yet the read has already errored and the link is torn down seconds later,
+  and it never retries. Requesting the bond at subscribe puts the prompt up
+  before the first encrypted read, so a first-time connection can complete
+  instead of having to fail once to provoke pairing.
 
 ### Security
 

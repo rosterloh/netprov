@@ -5,7 +5,7 @@ use super::gatt::{GattHandlers, build_application};
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use bluer::{
-    Address, Session as BluerSession,
+    Adapter, Address, Session as BluerSession,
     adv::{Advertisement, Type as AdvType},
     agent::Agent,
     gatt::CharacteristicWriter,
@@ -68,6 +68,37 @@ fn get_or_create_peer<F: NetworkFacade + 'static>(
     info!(peer = %peer_id, "peer session started");
     *guard = Some((peer_id, session.clone()));
     session
+}
+
+/// Asks BlueZ to bond with `addr` unless it already has.
+///
+/// The sensitive characteristics require an encrypted link, and a central only
+/// learns that by *failing* a read: BlueZ answers with ATT "Insufficient
+/// Encryption". CoreBluetooth does raise its pairing prompt at that point, but
+/// the read has already errored and the link is torn down a couple of seconds
+/// later — long before anyone can accept it, and CoreBluetooth never retries
+/// the read. Initiating the bond as soon as the peer subscribes puts the
+/// prompt up *before* the first encrypted read instead of after it.
+///
+/// Best-effort by design: a peer that is already bonded, declines, or whose
+/// stack initiates pairing itself must not stop the session from being served,
+/// so every failure here is logged and swallowed.
+async fn ensure_paired(adapter: Adapter, addr: Address) {
+    let device = match adapter.device(addr) {
+        Ok(d) => d,
+        Err(e) => {
+            debug!(error = ?e, "no device object to pair with");
+            return;
+        }
+    };
+    if let Ok(true) = device.is_paired().await {
+        return;
+    }
+    // Held to completion: dropping this future cancels the pairing request.
+    match device.pair().await {
+        Ok(()) => info!(peer = ?addr, "bonded with peer"),
+        Err(e) => debug!(error = ?e, "pairing request failed"),
+    }
 }
 
 /// Ends a departing peer's session: aborts its in-flight dispatch tasks and
@@ -302,6 +333,12 @@ where
                         // connection negotiated instead of the 512-byte ceiling.
                         peer.set_mtu(notifier.mtu());
                         info!(peer = %peer_id, mtu = notifier.mtu(), "peer subscribed");
+                        // Bond now, concurrently: subscribe happens before the
+                        // client's first encrypted read, so this is the last
+                        // point at which the pairing prompt can appear in time
+                        // to be useful. Spawned so a peer that never answers
+                        // the prompt cannot stall the notify loop.
+                        tokio::spawn(ensure_paired(adapter.clone(), addr));
                         active = Some((peer_id, peer, notifier));
                     }
                     CharacteristicControlEvent::Write(_) => {

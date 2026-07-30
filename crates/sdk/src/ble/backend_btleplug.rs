@@ -142,6 +142,16 @@ impl BleClient {
         // the stream valid across connections, and grabbing it first means a
         // fragment cannot land in the gap between subscribe and first read.
         let notifications = peripheral.notifications().await?;
+        // Clear any notify state CoreBluetooth cached from a previous
+        // connection first. It answers `subscribe` from that cache without
+        // writing the CCCD, so the peer never sees a new subscription, has
+        // nowhere to send responses, and every request times out. The previous
+        // session cannot always clean up after itself — when the server drops
+        // the link (a rejected PSK does exactly that) there is no connection
+        // left to unsubscribe over — so the reset belongs here, where it runs
+        // no matter how the last session ended. Errors are expected when
+        // nothing was subscribed.
+        let _ = peripheral.unsubscribe(&request).await;
         // Subscribing up front also makes the server mint a PeerSession
         // before authentication begins, matching the BlueZ backend.
         peripheral.subscribe(&request).await?;
@@ -187,6 +197,18 @@ impl BleClient {
     /// completes the request, and an unbounded wait here swallows the error
     /// the caller was about to report.
     pub async fn disconnect(&self) -> Result<(), SdkError> {
+        // Unsubscribe before dropping the link. CoreBluetooth caches a
+        // characteristic's notify state across connections, so if we leave it
+        // set, the next `subscribe` is answered from that cache without ever
+        // writing the CCCD — the peer then never sees a fresh subscription,
+        // has nowhere to send responses, and every request times out. Failure
+        // is ignored: the link may already be gone, which achieves the same
+        // thing.
+        let _ = tokio::time::timeout(
+            DISCONNECT_TIMEOUT,
+            self.peripheral.unsubscribe(&self.request),
+        )
+        .await;
         tokio::time::timeout(DISCONNECT_TIMEOUT, self.peripheral.disconnect())
             .await
             .map_err(|_| SdkError::Timeout(DISCONNECT_TIMEOUT))??;
@@ -229,7 +251,7 @@ impl ProvisioningClient for BleClient {
                     WriteType::WithResponse,
                 )
                 .await
-                .map_err(map_auth_write_err)?;
+                .map_err(map_auth_submit_err)?;
             // Read the server's own tag back off the same characteristic. Not
             // optional: it is what distinguishes the real device from a peer
             // that merely advertises the right service UUID.
@@ -237,7 +259,7 @@ impl ProvisioningClient for BleClient {
                 .peripheral
                 .read(&self.auth)
                 .await
-                .map_err(map_auth_write_err)?;
+                .map_err(map_auth_submit_err)?;
             if !verify_server_tag(&psk, &n, &client_nonce, &server) {
                 return Err(SdkError::ServerAuthFailed);
             }
@@ -341,6 +363,30 @@ fn map_auth_write_err(e: btleplug::Error) -> SdkError {
     } else {
         SdkError::from(e)
     }
+}
+
+/// Maps a failure of the two steps that submit and check credentials.
+///
+/// The server signals a bad tag by erroring the `AuthResponse` write *and*
+/// dropping the link. CoreBluetooth discards the ATT error once the
+/// disconnect lands, so on macOS a wrong PSK arrives here as nothing but
+/// "Device disconnected" — pointing at the radio when the real cause is the
+/// key. A disconnect at this exact point is nearly always a rejection, so say
+/// so while leaving room for a genuine link loss.
+fn map_auth_submit_err(e: btleplug::Error) -> SdkError {
+    let dropped = match &e {
+        btleplug::Error::NotConnected => true,
+        btleplug::Error::RuntimeError(msg) => msg.to_ascii_lowercase().contains("disconnect"),
+        _ => false,
+    };
+    if dropped {
+        return SdkError::Ble(
+            "peer closed the connection during authentication — most likely a wrong PSK, \
+             since the server drops the link when the tag does not verify"
+                .into(),
+        );
+    }
+    map_auth_write_err(e)
 }
 
 fn looks_like_auth_rejection(message: &str) -> bool {
@@ -686,6 +732,26 @@ mod tests {
                 other => panic!("expected a link-security error for {message}, got {other:?}"),
             }
         }
+    }
+
+    /// A wrong PSK reaches macOS as a bare disconnect, because the server
+    /// drops the link and CoreBluetooth discards the ATT error behind it.
+    #[test]
+    fn disconnect_while_submitting_credentials_points_at_the_psk() {
+        for e in [
+            btleplug::Error::NotConnected,
+            btleplug::Error::RuntimeError("Device disconnected".into()),
+        ] {
+            match map_auth_submit_err(e) {
+                SdkError::Ble(msg) => assert!(msg.contains("wrong PSK"), "unhelpful: {msg}"),
+                other => panic!("expected a PSK hint, got {other:?}"),
+            }
+        }
+        // A genuine authorization rejection still maps to AuthFailed.
+        assert!(matches!(
+            map_auth_submit_err(btleplug::Error::RuntimeError("NotAuthorized".into())),
+            SdkError::AuthFailed
+        ));
     }
 
     #[test]

@@ -66,7 +66,10 @@ cargo run -p netprov-app --features desktop
 Expect a **system pairing prompt** on the first connection — the Challenge,
 AuthResponse and Request characteristics all require an encrypted link. Just
 accept it; there is no passkey to compare, because a headless peripheral can
-only offer Just Works pairing. Man-in-the-middle protection comes from the
+only offer Just Works pairing. `netprovd` requests the bond itself as soon as
+you subscribe, so the prompt appears *before* the first encrypted read; accept
+it while the command is still running and that same run completes. Later
+connections reuse the bond and prompt for nothing. Man-in-the-middle protection comes from the
 mutual PSK handshake instead: the client verifies the server's HMAC tag before
 sending anything, so a device that cannot prove it holds the PSK is refused
 with `server failed to prove it holds the PSK`.
@@ -100,6 +103,16 @@ macOS-specific:
   with the wrong tag. Either the two sides hold different PSKs, or the device
   is not the one you think it is. This is a hard failure by design; no request
   is sent.
+- `peer closed the connection during authentication — most likely a wrong PSK`
+  — what a rejected key looks like from macOS. The server errors the
+  `AuthResponse` write *and* drops the link, and CoreBluetooth discards the ATT
+  error once the disconnect lands, so the underlying "not authorized" never
+  reaches the client. Re-copy the key before suspecting the radio.
+- Every request timing out at 35 s while the daemon logs `dropping notify frame
+  for inactive peer` — CoreBluetooth served a cached notify state and never
+  wrote the CCCD, so the daemon saw no subscription. The client clears that
+  cache on connect; if you hit this against an older client, power-cycle
+  Bluetooth on the Mac.
 - Slow round trips are expected: CoreBluetooth does not report a negotiated
   MTU, so requests fragment at the 20-byte ATT floor. Set
   `NETPROV_BLE_MAX_FRAGMENT` (e.g. `185`) to raise it.

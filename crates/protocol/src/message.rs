@@ -87,7 +87,14 @@ pub enum Envelope {
     AuthSubmit(#[serde(with = "serde_bytes")] Vec<u8>),
     /// The server's own tag, proving it holds the PSK too.
     AuthOk(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// The tag did not verify.
     AuthFail,
+    /// Too many failed attempts; the peer is locked out. Distinct from
+    /// `AuthFail` so a legitimate operator is told to wait rather than to
+    /// re-check a key that was never the problem.
+    AuthRateLimited {
+        retry_after_seconds: u32,
+    },
     Req(Request),
     Resp(Response),
 }

@@ -358,11 +358,29 @@ fn map_auth_write_err(e: btleplug::Error) -> SdkError {
              pairing prompt, forget the device in Bluetooth settings and reconnect."
         ));
     }
+    // Checked before the auth sniff: BlueZ spells this "NotPermitted", which
+    // would otherwise be missed entirely and reported as a transport error.
+    if looks_like_rate_limit(&text) {
+        return SdkError::RateLimited {
+            retry_after_seconds: None,
+        };
+    }
     if matches!(e, btleplug::Error::PermissionDenied) || looks_like_auth_rejection(&text) {
         SdkError::AuthFailed
     } else {
         SdkError::from(e)
     }
+}
+
+/// Whether the peer refused because this client is locked out rather than
+/// because the key is wrong.
+///
+/// The server answers a locked-out peer with ATT "insufficient
+/// authorisation"/`NotPermitted`. As with every other ATT error on
+/// CoreBluetooth, this only arrives if the platform surfaces the text at all.
+fn looks_like_rate_limit(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("notpermitted") || lowered.contains("not permitted")
 }
 
 /// Maps a failure of the two steps that submit and check credentials.

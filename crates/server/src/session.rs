@@ -111,6 +111,20 @@ enum SessionAuthState {
     Authenticated,
 }
 
+/// What came of an `AuthResponse` submission.
+///
+/// Replaces a bare `Option<Tag>`, which conflated "wrong key" with "locked
+/// out" and left the caller nothing to tell the peer apart with (#18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthOutcome {
+    /// Verified. The peer reads this tag back to authenticate the server.
+    Ok(Tag),
+    /// The tag did not verify.
+    BadTag,
+    /// The peer is locked out; the tag was not examined.
+    Locked { retry_after: std::time::Duration },
+}
+
 pub enum HandleIncoming {
     /// No response required (e.g., successful auth handshake progress).
     Ack,
@@ -150,7 +164,7 @@ impl<F: NetworkFacade> Session<F> {
     /// Returns the server's own tag on success, for the peer to verify. The
     /// tag is only ever computed after the client's tag has been checked, so
     /// it cannot be used as a PSK oracle.
-    pub fn submit_auth(&mut self, payload: &[u8]) -> Option<Tag> {
+    pub fn submit_auth(&mut self, payload: &[u8]) -> AuthOutcome {
         // Consume the pending nonce first, so a lockout cannot park a still-
         // valid nonce for the whole window and let the first attempt after it
         // expires spend it (#19).
@@ -163,22 +177,26 @@ impl<F: NetworkFacade> Session<F> {
         self.state = SessionAuthState::Unauthenticated {
             pending_nonce: None,
         };
-        if matches!(
-            self.rate_limiter.check(&self.peer_id),
-            CheckResult::Locked { .. }
-        ) {
-            return None;
+        if let CheckResult::Locked { retry_after } = self.rate_limiter.check(&self.peer_id) {
+            return AuthOutcome::Locked { retry_after };
         }
-        let server_nonce = pending?;
-        let (client_nonce, tag) = split_auth_payload(payload)?;
+        // A missing nonce or a malformed payload is indistinguishable from a
+        // wrong key to the peer, and deliberately so: neither should reveal
+        // how far through the handshake it got.
+        let Some(server_nonce) = pending else {
+            return AuthOutcome::BadTag;
+        };
+        let Some((client_nonce, tag)) = split_auth_payload(payload) else {
+            return AuthOutcome::BadTag;
+        };
 
         if verify_client_tag(&self.psk, &server_nonce, &client_nonce, tag) {
             self.state = SessionAuthState::Authenticated;
             self.rate_limiter.record_success(&self.peer_id);
-            Some(server_tag(&self.psk, &server_nonce, &client_nonce))
+            AuthOutcome::Ok(server_tag(&self.psk, &server_nonce, &client_nonce))
         } else {
             self.rate_limiter.record_failure(&self.peer_id);
-            None
+            AuthOutcome::BadTag
         }
     }
 
@@ -314,7 +332,10 @@ mod tests {
     async fn auth_flow_then_list() {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
-        assert!(s.submit_auth(&payload(&psk, &nonce)).is_some());
+        assert!(matches!(
+            s.submit_auth(&payload(&psk, &nonce)),
+            AuthOutcome::Ok(_)
+        ));
         let resp = s
             .handle_request(Request {
                 request_id: 1,
@@ -328,7 +349,7 @@ mod tests {
     async fn wrong_tag_stays_unauth() {
         let (_psk, mut s) = fixture();
         s.issue_nonce();
-        assert!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]).is_none());
+        assert_eq!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]), AuthOutcome::BadTag);
         assert!(!s.is_authenticated());
     }
 
@@ -339,12 +360,12 @@ mod tests {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
         let client_nonce = [0xABu8; NONCE_LEN];
-        let tag = s
-            .submit_auth(&auth_payload(
-                &client_nonce,
-                &client_tag(&psk, &nonce, &client_nonce),
-            ))
-            .expect("auth succeeds");
+        let AuthOutcome::Ok(tag) = s.submit_auth(&auth_payload(
+            &client_nonce,
+            &client_tag(&psk, &nonce, &client_nonce),
+        )) else {
+            panic!("auth should succeed");
+        };
         assert!(verify_server_tag(&psk, &nonce, &client_nonce, &tag));
         // And it must not be the client's own tag echoed back.
         assert!(!verify_client_tag(&psk, &nonce, &client_nonce, &tag));
@@ -357,7 +378,10 @@ mod tests {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
         let good = payload(&psk, &nonce);
-        assert!(s.submit_auth(&good[..AUTH_PAYLOAD_LEN - 1]).is_none());
+        assert_eq!(
+            s.submit_auth(&good[..AUTH_PAYLOAD_LEN - 1]),
+            AuthOutcome::BadTag
+        );
         assert!(!s.is_authenticated());
     }
 
@@ -377,8 +401,15 @@ mod tests {
         for _ in 0..5 {
             limiter.record_failure("peer-A");
         }
-        // Refused because the peer is locked out, not because the tag is bad.
-        assert!(s.submit_auth(&payload(&psk, &nonce)).is_none());
+        // Refused because the peer is locked out, not because the tag is bad —
+        // and the outcome now says which (#18).
+        assert!(
+            matches!(
+                s.submit_auth(&payload(&psk, &nonce)),
+                AuthOutcome::Locked { retry_after } if retry_after.as_secs() > 0
+            ),
+            "a locked-out peer must be told to wait, not that its key is wrong"
+        );
         assert!(
             s.pending_nonce().is_none(),
             "lockout must still consume the pending nonce"
@@ -391,9 +422,9 @@ mod tests {
         let nonce = s.issue_nonce();
         let good = payload(&psk, &nonce);
         // Wrong first attempt consumes the nonce.
-        assert!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]).is_none());
+        assert_eq!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]), AuthOutcome::BadTag);
         // Second attempt with the correct tag but stale nonce must fail.
-        assert!(s.submit_auth(&good).is_none());
+        assert_eq!(s.submit_auth(&good), AuthOutcome::BadTag);
     }
 
     #[tokio::test]

@@ -192,3 +192,60 @@ async fn connect_wifi_then_status_reflects_ssid() {
         _ => panic!(),
     }
 }
+
+/// #18: a locked-out operator used to get the same "authentication failed" as
+/// someone with the wrong key, for the whole ten-minute window — with nothing
+/// to suggest that waiting, rather than re-checking the key, was the remedy.
+#[tokio::test]
+async fn lockout_is_reported_with_a_retry_time() {
+    let server_psk = [1u8; PSK_LEN];
+    let wrong_psk = [2u8; PSK_LEN];
+    // Shared across connections, so the failures accumulate against the peer
+    // the way they do for a real client retrying.
+    let limiter = Arc::new(RateLimiter::with_defaults());
+
+    let connect = |limiter: Arc<RateLimiter>| {
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(run_server(
+            server_io,
+            ServerConfig {
+                psk: server_psk,
+                peer_id: "locked-peer".into(),
+            },
+            Arc::new(MockFacade::new()),
+            limiter,
+        ));
+        Client::new(client_io)
+    };
+
+    // Default threshold is 5 failures.
+    for attempt in 0..5 {
+        let err = connect(limiter.clone())
+            .authenticate(wrong_psk)
+            .await
+            .expect_err("wrong PSK must fail");
+        assert!(
+            matches!(err, netprov_client::ClientError::AuthFailed),
+            "attempt {attempt} should be a plain auth failure, got {err:?}"
+        );
+    }
+
+    // Now locked out. Even the *correct* key must say "wait", not "wrong key".
+    let err = connect(limiter)
+        .authenticate(server_psk)
+        .await
+        .expect_err("locked out");
+    match err {
+        netprov_client::ClientError::RateLimited {
+            retry_after_seconds,
+        } => {
+            let secs = retry_after_seconds.expect("TCP carries the timer");
+            assert!(secs > 0, "retry time should be positive, got {secs}");
+            assert!(
+                err.to_string().contains("retry in"),
+                "message should tell the operator to wait: {err}"
+            );
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+}

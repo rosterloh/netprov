@@ -1,6 +1,6 @@
 use crate::facade::NetworkFacade;
 use crate::rate_limit::{CheckResult, RateLimiter};
-use crate::session::Session;
+use crate::session::{AuthOutcome, Session};
 use netprov_protocol::*;
 use netprov_protocol::{TransportError, read_message, write_message};
 use std::sync::Arc;
@@ -49,21 +49,28 @@ where
             Envelope::NonceRequest => {
                 if let CheckResult::Locked { retry_after } = rate_limiter.check(&cfg.peer_id) {
                     warn!(peer = %cfg.peer_id, retry_after_s = retry_after.as_secs(), "peer is locked out");
-                    // Reply with AuthFail so the client stops; they won't know the timer.
-                    Envelope::AuthFail
+                    Envelope::AuthRateLimited {
+                        retry_after_seconds: retry_after.as_secs().min(u32::MAX as u64) as u32,
+                    }
                 } else {
                     let nonce = session.issue_nonce();
                     Envelope::NonceReply(nonce.to_vec())
                 }
             }
             Envelope::AuthSubmit(payload) => match session.submit_auth(&payload) {
-                Some(tag) => {
+                AuthOutcome::Ok(tag) => {
                     info!(peer = %cfg.peer_id, "authenticated");
                     Envelope::AuthOk(tag.to_vec())
                 }
-                None => {
+                AuthOutcome::BadTag => {
                     warn!(peer = %cfg.peer_id, "auth failed");
                     Envelope::AuthFail
+                }
+                AuthOutcome::Locked { retry_after } => {
+                    warn!(peer = %cfg.peer_id, retry_after_s = retry_after.as_secs(), "peer is locked out");
+                    Envelope::AuthRateLimited {
+                        retry_after_seconds: retry_after.as_secs().min(u32::MAX as u64) as u32,
+                    }
                 }
             },
             Envelope::Req(req) => {
@@ -74,6 +81,7 @@ where
             Envelope::NonceReply(_)
             | Envelope::AuthOk(_)
             | Envelope::AuthFail
+            | Envelope::AuthRateLimited { .. }
             | Envelope::Resp(_) => {
                 warn!("client sent server-origin envelope; closing");
                 return Ok(());

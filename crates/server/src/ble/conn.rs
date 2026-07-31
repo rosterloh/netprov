@@ -6,7 +6,7 @@
 
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
-use crate::session::{Session, dispatch};
+use crate::session::{AuthOutcome, Session, dispatch};
 use netprov_protocol::{
     AUTH_PAYLOAD_LEN, BoundedString, InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE,
     PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, SUPPORTED_OPS_ALL,
@@ -107,23 +107,24 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().issue_nonce().to_vec()
     }
 
-    /// AuthResponse write handler — returns true on success, and stashes the
-    /// server's own tag for the peer to read back from the same
-    /// characteristic (see [`Self::on_auth_read`]).
-    pub fn on_auth(&self, payload: Vec<u8>) -> bool {
+    /// AuthResponse write handler. On success it stashes the server's own tag
+    /// for the peer to read back from the same characteristic (see
+    /// [`Self::on_auth_read`]).
+    ///
+    /// The outcome is returned rather than a bare bool so the GATT layer can
+    /// answer a locked-out peer with a different ATT error than a wrong key
+    /// (#18).
+    pub fn on_auth(&self, payload: Vec<u8>) -> AuthOutcome {
         if payload.len() != AUTH_PAYLOAD_LEN {
-            return false;
+            *self.server_tag.lock().unwrap() = None;
+            return AuthOutcome::BadTag;
         }
-        match self.session.lock().unwrap().submit_auth(&payload) {
-            Some(tag) => {
-                *self.server_tag.lock().unwrap() = Some(tag);
-                true
-            }
-            None => {
-                *self.server_tag.lock().unwrap() = None;
-                false
-            }
-        }
+        let outcome = self.session.lock().unwrap().submit_auth(&payload);
+        *self.server_tag.lock().unwrap() = match &outcome {
+            AuthOutcome::Ok(tag) => Some(*tag),
+            _ => None,
+        };
+        outcome
     }
 
     /// AuthResponse read handler — the server's proof that it holds the PSK.

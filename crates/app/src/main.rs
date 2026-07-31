@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use netprov_protocol::{
-    Interface, IpConfig, PSK_LEN, Security, StaticIpv4, WifiCredential, WifiStatus,
+    Interface, IpConfig, Ipv4Method, PSK_LEN, Security, StaticIpv4, WifiCredential, WifiNetwork,
+    WifiStatus,
 };
 use netprov_sdk::{BleClient, BleDevice, Netprov, PEER_ID_HINT, parse_peer_id};
 use std::sync::Arc;
@@ -179,8 +180,8 @@ fn App() -> Element {
                 if let Some(message) = connection_error_view {
                     div { class: "error-row", "{message}" }
                 }
-            } else if let Some(snapshot) = snapshot_view {
-                Dashboard { snapshot }
+            } else if snapshot_view.is_some() {
+                Dashboard { client, snapshot }
             }
 
         }
@@ -252,28 +253,267 @@ fn DeviceList(
 }
 
 #[component]
-fn Dashboard(snapshot: DeviceSnapshot) -> Element {
+fn Dashboard(
+    client: Signal<Option<SharedClient>>,
+    mut snapshot: Signal<Option<DeviceSnapshot>>,
+) -> Element {
+    let mut wifi_networks = use_signal(Vec::<WifiNetwork>::new);
+    let mut selected_bssid = use_signal(|| None::<String>);
+    let mut wifi_password = use_signal(String::new);
+    let mut wifi_busy = use_signal(|| false);
+    let mut wifi_error = use_signal(|| None::<String>);
+    let mut success_message = use_signal(|| None::<String>);
+    let mut selected_interface = use_signal(|| None::<String>);
+    let mut dhcp_mode = use_signal(|| true);
+    let mut address = use_signal(String::new);
+    let mut gateway = use_signal(String::new);
+    let mut dns = use_signal(String::new);
+    let mut ip_busy = use_signal(|| false);
+    let mut ip_error = use_signal(|| None::<String>);
+    let mut confirm_ip = use_signal(|| false);
+    let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
+
+    let snapshot_view = snapshot().expect("dashboard requires a connected device");
+    let wifi_networks_view = wifi_networks();
+    let selected_bssid_view = selected_bssid();
+    let wifi_password_view = wifi_password();
+    let wifi_error_view = wifi_error();
+    let success_message_view = success_message();
+    let selected_interface_view = selected_interface();
+    let dhcp_mode_view = dhcp_mode();
+    let address_view = address();
+    let gateway_view = gateway();
+    let dns_view = dns();
+    let ip_error_view = ip_error();
+    let wifi_is_busy = wifi_busy();
+    let ip_is_busy = ip_busy();
+
+    let scan = move |_| {
+        let Some(client) = client() else {
+            return;
+        };
+        wifi_busy.set(true);
+        wifi_error.set(None);
+        success_message.set(None);
+        spawn(async move {
+            match scan_wifi(client).await {
+                Ok(mut networks) => {
+                    sort_wifi_networks(&mut networks);
+                    wifi_networks.set(networks);
+                    selected_bssid.set(None);
+                }
+                Err(err) => wifi_error.set(Some(err)),
+            }
+            wifi_busy.set(false);
+        });
+    };
+
+    let connect_wifi = move |_| {
+        let Some(client) = client() else {
+            return;
+        };
+        let Some(bssid) = selected_bssid() else {
+            wifi_error.set(Some("Select a Wi-Fi network.".into()));
+            return;
+        };
+        let Some(network) = wifi_networks()
+            .into_iter()
+            .find(|network| network.bssid == bssid)
+        else {
+            wifi_error.set(Some(
+                "The selected Wi-Fi network is no longer available.".into(),
+            ));
+            return;
+        };
+        let ssid = network.ssid.clone();
+        let password = wifi_password();
+        wifi_busy.set(true);
+        wifi_error.set(None);
+        success_message.set(None);
+        spawn(async move {
+            match connect_selected_wifi(client, network, password).await {
+                Ok(status) => {
+                    snapshot.with_mut(|snapshot| {
+                        if let Some(snapshot) = snapshot {
+                            snapshot.wifi_status = status;
+                        }
+                    });
+                    wifi_password.set(String::new());
+                    success_message.set(Some(format!("Connected to {ssid}")));
+                }
+                Err(err) => wifi_error.set(Some(err)),
+            }
+            wifi_busy.set(false);
+        });
+    };
+
+    let request_ip_change = move |_| match prepare_ip_change(
+        selected_interface(),
+        dhcp_mode(),
+        &address(),
+        &gateway(),
+        &dns(),
+    ) {
+        Ok(change) => {
+            pending_ip_change.set(Some(change));
+            ip_error.set(None);
+            confirm_ip.set(true);
+        }
+        Err(err) => {
+            confirm_ip.set(false);
+            ip_error.set(Some(err));
+        }
+    };
+
+    let apply_ip = move |_| {
+        let Some(client) = client() else {
+            return;
+        };
+        let Some((iface, config)) = pending_ip_change() else {
+            return;
+        };
+        confirm_ip.set(false);
+        ip_busy.set(true);
+        ip_error.set(None);
+        success_message.set(None);
+        spawn(async move {
+            match apply_ip_config(client, iface.clone(), config).await {
+                Ok(config) => {
+                    snapshot.with_mut(|snapshot| {
+                        if let Some(snapshot) = snapshot {
+                            replace_interface_config(snapshot, &iface, config);
+                        }
+                    });
+                    pending_ip_change.set(None);
+                    success_message.set(Some("Network configuration updated".into()));
+                }
+                Err(err) => ip_error.set(Some(err)),
+            }
+            ip_busy.set(false);
+        });
+    };
+
     rsx! {
         section { class: "dashboard",
+            if let Some(message) = success_message_view {
+                div { class: "status ready", "{message}" }
+            }
             div { class: "panel",
                 h2 { "Interfaces" }
                 div { class: "interface-list",
-                    for snapshot in snapshot.interfaces {
+                    for interface_snapshot in snapshot_view.interfaces {
                         {
-                            let iface = snapshot.interface;
+                            let selected = selected_interface_view.as_deref()
+                                == Some(interface_snapshot.interface.name.as_str());
+                            let row_class = if selected {
+                                "device-row selected"
+                            } else {
+                                "device-row"
+                            };
+                            let iface = interface_snapshot.interface.clone();
                             let mac = iface.mac.clone().unwrap_or_else(|| "-".to_string());
+                            let address_text = interface_snapshot
+                                .config
+                                .addresses
+                                .first()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "-".to_string());
+                            let selected_snapshot = interface_snapshot.clone();
                             rsx! {
-                        div { class: "interface-row",
-                            div {
-                                strong { "{iface.name}" }
+                                button {
+                                    key: "{iface.name}",
+                                    class: row_class,
+                                    disabled: ip_is_busy,
+                                    onclick: move |_| {
+                                        let config = &selected_snapshot.config;
+                                        selected_interface.set(Some(
+                                            selected_snapshot.interface.name.clone()
+                                        ));
+                                        dhcp_mode.set(matches!(config.method, Ipv4Method::Auto));
+                                        address.set(config.addresses.first()
+                                            .map(ToString::to_string)
+                                            .unwrap_or_default());
+                                        gateway.set(config.gateway
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_default());
+                                        dns.set(config.dns.iter()
+                                            .map(ToString::to_string)
+                                            .collect::<Vec<_>>()
+                                            .join(", "));
+                                        ip_error.set(None);
+                                    },
+                                    div {
+                                        strong { "{iface.name}" }
                                         span { "{mac}" }
-                            }
-                            div { class: "interface-meta",
-                                span { "{iface.iface_type:?}" }
-                                span { "{iface.state:?}" }
+                                    }
+                                    div { class: "interface-meta",
+                                        span { "{iface.iface_type:?}" }
+                                        span { "{iface.state:?}" }
+                                        span { "{interface_snapshot.config.method:?}" }
+                                        span { "{address_text}" }
+                                    }
+                                }
                             }
                         }
+                    }
+                }
+
+                if let Some(iface) = selected_interface_view {
+                    div { class: "metric-grid",
+                        strong { "Configure {iface}" }
+                        label {
+                            input {
+                                r#type: "radio",
+                                name: "ipv4-mode",
+                                checked: dhcp_mode_view,
+                                disabled: ip_is_busy,
+                                onchange: move |_| dhcp_mode.set(true),
                             }
+                            "DHCP"
+                        }
+                        label {
+                            input {
+                                r#type: "radio",
+                                name: "ipv4-mode",
+                                checked: !dhcp_mode_view,
+                                disabled: ip_is_busy,
+                                onchange: move |_| dhcp_mode.set(false),
+                            }
+                            "Static"
+                        }
+                        if !dhcp_mode_view {
+                            label {
+                                span { "Address / prefix" }
+                                input {
+                                    value: "{address_view}",
+                                    disabled: ip_is_busy,
+                                    oninput: move |event| address.set(event.value()),
+                                }
+                            }
+                            label {
+                                span { "Gateway" }
+                                input {
+                                    value: "{gateway_view}",
+                                    disabled: ip_is_busy,
+                                    oninput: move |event| gateway.set(event.value()),
+                                }
+                            }
+                            label {
+                                span { "DNS" }
+                                input {
+                                    value: "{dns_view}",
+                                    disabled: ip_is_busy,
+                                    oninput: move |event| dns.set(event.value()),
+                                }
+                            }
+                        }
+                        button {
+                            disabled: ip_is_busy,
+                            onclick: request_ip_change,
+                            if ip_is_busy { "Applying..." } else { "Apply" }
+                        }
+                        if let Some(message) = ip_error_view {
+                            div { class: "error-row", "{message}" }
                         }
                     }
                 }
@@ -284,19 +524,105 @@ fn Dashboard(snapshot: DeviceSnapshot) -> Element {
                 div { class: "metric-grid",
                     Metric {
                         label: "SSID".to_string(),
-                        value: snapshot.wifi_status.ssid.unwrap_or_else(|| "-".to_string()),
+                        value: snapshot_view.wifi_status.ssid.clone()
+                            .unwrap_or_else(|| "-".to_string()),
                     }
                     Metric {
                         label: "Signal".to_string(),
-                        value: snapshot.wifi_status.signal
+                        value: snapshot_view.wifi_status.signal
                             .map(|signal| format!("{signal}%"))
                             .unwrap_or_else(|| "-".to_string()),
                     }
                     Metric {
                         label: "Security".to_string(),
-                        value: snapshot.wifi_status.security
+                        value: snapshot_view.wifi_status.security.clone()
                             .map(|security| format!("{security:?}"))
                             .unwrap_or_else(|| "-".to_string()),
+                    }
+                }
+                div { class: "connection-actions",
+                    button {
+                        disabled: wifi_is_busy,
+                        onclick: scan,
+                        if wifi_is_busy { "Working..." } else { "Scan" }
+                    }
+                    button {
+                        disabled: wifi_is_busy || selected_bssid_view.is_none(),
+                        onclick: connect_wifi,
+                        "Connect"
+                    }
+                }
+                div { class: "device-list",
+                    for network in wifi_networks_view {
+                        {
+                            let selected = selected_bssid_view.as_deref()
+                                == Some(network.bssid.as_str());
+                            let current = snapshot_view.wifi_status.ssid.as_deref()
+                                == Some(network.ssid.as_str());
+                            let row_class = if selected {
+                                "device-row selected"
+                            } else {
+                                "device-row"
+                            };
+                            let signal = network.signal
+                                .map(|signal| format!("{signal}%"))
+                                .unwrap_or_else(|| "-".to_string());
+                            let security = network.security.as_ref()
+                                .map(|security| format!("{security:?}"))
+                                .unwrap_or_else(|| "Unknown".to_string());
+                            let selected_network = network.clone();
+                            rsx! {
+                                button {
+                                    key: "{network.bssid}",
+                                    class: row_class,
+                                    disabled: wifi_is_busy,
+                                    onclick: move |_| selected_bssid.set(Some(
+                                        selected_network.bssid.clone()
+                                    )),
+                                    div {
+                                        strong { "{network.ssid}" }
+                                        span { "{security}" }
+                                    }
+                                    div {
+                                        span { "{signal}" }
+                                        if current { span { "Current" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                label {
+                    span { "Password" }
+                    input {
+                        r#type: "password",
+                        value: "{wifi_password_view}",
+                        disabled: wifi_is_busy,
+                        oninput: move |event| wifi_password.set(event.value()),
+                    }
+                }
+                if let Some(message) = wifi_error_view {
+                    div { class: "error-row", "{message}" }
+                }
+            }
+
+            if confirm_ip() {
+                dialog { open: true,
+                    p { "Apply this network configuration?" }
+                    div { class: "connection-actions",
+                        button {
+                            disabled: ip_is_busy,
+                            onclick: apply_ip,
+                            "Confirm"
+                        }
+                        button {
+                            disabled: ip_is_busy,
+                            onclick: move |_| {
+                                confirm_ip.set(false);
+                                pending_ip_change.set(None);
+                            },
+                            "Cancel"
+                        }
                     }
                 }
             }
@@ -321,7 +647,33 @@ async fn scan_ble_devices() -> Result<Vec<DeviceSummary>, String> {
     Ok(devices.into_iter().map(DeviceSummary::from).collect())
 }
 
-#[allow(dead_code)] // Used by the provisioning form added in the next app slice.
+async fn scan_wifi(client: SharedClient) -> Result<Vec<WifiNetwork>, String> {
+    client
+        .lock()
+        .await
+        .wifi_scan()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn connect_selected_wifi(
+    client: SharedClient,
+    network: WifiNetwork,
+    password: String,
+) -> Result<WifiStatus, String> {
+    let credential = wifi_credential(network.security.as_ref(), &password)?;
+    let mut client = client.lock().await;
+    client
+        .connect_wifi(network.ssid, credential)
+        .await
+        .map_err(|err| err.to_string())?;
+    client.wifi_status().await.map_err(|err| err.to_string())
+}
+
+fn sort_wifi_networks(networks: &mut [WifiNetwork]) {
+    networks.sort_by_key(|network| std::cmp::Reverse(network.signal.unwrap_or(0)));
+}
+
 fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIpv4, String> {
     let address = address
         .trim()
@@ -355,7 +707,22 @@ fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIp
     })
 }
 
-#[allow(dead_code)] // Used by the provisioning form added in the next app slice.
+fn prepare_ip_change(
+    iface: Option<String>,
+    dhcp: bool,
+    address: &str,
+    gateway: &str,
+    dns: &str,
+) -> Result<(String, Option<StaticIpv4>), String> {
+    let iface = iface.ok_or_else(|| "Select an interface.".to_string())?;
+    let config = if dhcp {
+        None
+    } else {
+        Some(parse_static_ipv4(address, gateway, dns)?)
+    };
+    Ok((iface, config))
+}
+
 fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCredential, String> {
     if matches!(security, Some(Security::Open)) {
         return Ok(WifiCredential::Open);
@@ -370,6 +737,38 @@ fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCr
         Some(Security::Wep) => Err("WEP networks are not supported.".into()),
         Some(Security::Open) => unreachable!(),
         None => Err("This network did not report a supported security mode.".into()),
+    }
+}
+
+async fn apply_ip_config(
+    client: SharedClient,
+    iface: String,
+    config: Option<StaticIpv4>,
+) -> Result<IpConfig, String> {
+    let mut client = client.lock().await;
+    match config {
+        Some(config) => client
+            .set_static_ipv4(iface.clone(), config)
+            .await
+            .map_err(|err| err.to_string())?,
+        None => client
+            .set_dhcp(iface.clone())
+            .await
+            .map_err(|err| err.to_string())?,
+    }
+    client
+        .get_ip_config(iface)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+fn replace_interface_config(snapshot: &mut DeviceSnapshot, iface: &str, config: IpConfig) {
+    if let Some(interface) = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|snapshot| snapshot.interface.name == iface)
+    {
+        interface.config = config;
     }
 }
 
@@ -449,6 +848,7 @@ impl From<BleDevice> for DeviceSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netprov_protocol::{IfaceState, IfaceType, Ipv4Method, WifiNetwork};
 
     #[tokio::test]
     async fn rejects_empty_peer_before_connecting() {
@@ -498,5 +898,94 @@ mod tests {
         assert!(wifi_credential(Some(&Security::Wep), "password").is_err());
         assert!(wifi_credential(Some(&Security::Wpa3), "short").is_err());
         assert!(wifi_credential(None, "password").is_err());
+    }
+
+    #[test]
+    fn sorts_wifi_by_descending_signal() {
+        let mut networks = vec![
+            WifiNetwork {
+                ssid: "weak".into(),
+                signal: Some(20),
+                security: Some(Security::Open),
+                bssid: "20".into(),
+            },
+            WifiNetwork {
+                ssid: "unknown".into(),
+                signal: None,
+                security: Some(Security::Open),
+                bssid: "none".into(),
+            },
+            WifiNetwork {
+                ssid: "strong".into(),
+                signal: Some(80),
+                security: Some(Security::Open),
+                bssid: "80".into(),
+            },
+        ];
+
+        sort_wifi_networks(&mut networks);
+
+        assert_eq!(
+            networks
+                .iter()
+                .map(|network| network.bssid.as_str())
+                .collect::<Vec<_>>(),
+            ["80", "20", "none"]
+        );
+    }
+
+    #[test]
+    fn replaces_only_the_selected_interface_config() {
+        let automatic = IpConfig {
+            method: Ipv4Method::Auto,
+            addresses: vec![],
+            gateway: None,
+            dns: vec![],
+        };
+        let manual = IpConfig {
+            method: Ipv4Method::Manual,
+            addresses: vec!["192.168.2.10/24".parse().unwrap()],
+            gateway: Some("192.168.2.1".parse().unwrap()),
+            dns: vec!["1.1.1.1".parse().unwrap()],
+        };
+        let mut snapshot = DeviceSnapshot {
+            interfaces: ["eth0", "wlan0"]
+                .into_iter()
+                .map(|name| InterfaceSnapshot {
+                    interface: Interface {
+                        name: name.into(),
+                        iface_type: IfaceType::Ethernet,
+                        mac: None,
+                        state: IfaceState::Up,
+                    },
+                    config: automatic.clone(),
+                })
+                .collect(),
+            wifi_status: WifiStatus {
+                ssid: None,
+                signal: None,
+                security: None,
+            },
+        };
+
+        replace_interface_config(&mut snapshot, "wlan0", manual.clone());
+
+        assert_eq!(snapshot.interfaces[0].config, automatic);
+        assert_eq!(snapshot.interfaces[1].config, manual);
+    }
+
+    #[test]
+    fn pending_ip_change_owns_its_original_interface() {
+        let (iface, config) = prepare_ip_change(
+            Some("wlan0".into()),
+            false,
+            "192.168.2.10/24",
+            "192.168.2.1",
+            "1.1.1.1",
+        )
+        .unwrap();
+
+        assert_eq!(iface, "wlan0");
+        assert_eq!(config.unwrap().address.to_string(), "192.168.2.10/24");
     }
 }

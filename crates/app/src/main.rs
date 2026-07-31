@@ -393,11 +393,19 @@ async fn connect_device(
         .await
         .map_err(|err| err.to_string())?;
     let mut client = Netprov::new(client);
-    client
-        .authenticate(psk)
-        .await
-        .map_err(|err| err.to_string())?;
-    let snapshot = load_snapshot(&mut client).await?;
+    if let Err(err) = client.authenticate(psk).await {
+        let error = err.to_string();
+        let _ = client.inner().disconnect().await;
+        return Err(error);
+    }
+    let snapshot = match load_snapshot(&mut client).await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            let error = err.to_string();
+            let _ = client.inner().disconnect().await;
+            return Err(error);
+        }
+    };
     Ok((Arc::new(Mutex::new(client)), snapshot))
 }
 

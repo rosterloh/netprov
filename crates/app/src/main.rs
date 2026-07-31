@@ -3,20 +3,14 @@ use netprov_protocol::{
     Interface, IpConfig, PSK_LEN, Security, StaticIpv4, WifiCredential, WifiStatus,
 };
 use netprov_sdk::{BleClient, BleDevice, Netprov, PEER_ID_HINT, parse_peer_id};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 
 fn main() {
     dioxus::launch(App);
-}
-
-#[derive(Clone, PartialEq)]
-enum ConnectionState {
-    Idle,
-    Busy,
-    Ready,
-    Failed(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -52,28 +46,36 @@ struct InterfaceSnapshot {
     config: IpConfig,
 }
 
+type SharedClient = Arc<Mutex<Netprov<BleClient>>>;
+
 #[component]
 fn App() -> Element {
     let mut peer = use_signal(String::new);
     let mut key_path = use_signal(|| "/etc/netprov/key".to_string());
-    let mut state = use_signal(|| ConnectionState::Idle);
     let mut scan_state = use_signal(|| ScanState::Idle);
     let mut devices = use_signal(Vec::<DeviceSummary>::new);
+    let mut client = use_signal(|| None::<SharedClient>);
     let mut snapshot = use_signal(|| None::<DeviceSnapshot>);
+    let mut selected_device = use_signal(|| None::<DeviceSummary>);
+    let mut connection_error = use_signal(|| None::<String>);
+    let mut is_connecting = use_signal(|| false);
 
     let current_peer = peer();
     let current_key_path = key_path();
     let devices_view = devices();
     let scan_state_view = scan_state();
+    let client_view = client();
     let snapshot_view = snapshot();
-    let state_view = state();
-    let is_busy = matches!(state_view, ConnectionState::Busy);
+    let selected_peer = selected_device().map(|device| device.id);
+    let connection_error_view = connection_error();
+    let is_busy = is_connecting();
     let is_scanning = matches!(scan_state_view, ScanState::Scanning);
     let can_connect = !is_busy && !current_peer.trim().is_empty();
 
     let scan = move |_| {
         scan_state.set(ScanState::Scanning);
         devices.set(Vec::new());
+        selected_device.set(None);
         spawn(async move {
             match scan_ble_devices().await {
                 Ok(found) => {
@@ -88,17 +90,27 @@ fn App() -> Element {
     let connect = move |_| {
         let peer_value = peer();
         let key_path_value = key_path();
-        state.set(ConnectionState::Busy);
-        snapshot.set(None);
+        is_connecting.set(true);
+        connection_error.set(None);
         spawn(async move {
-            match load_snapshot(peer_value, key_path_value).await {
-                Ok(next) => {
-                    snapshot.set(Some(next));
-                    state.set(ConnectionState::Ready);
+            match connect_device(peer_value, key_path_value).await {
+                Ok((next_client, next_snapshot)) => {
+                    snapshot.set(Some(next_snapshot));
+                    client.set(Some(next_client));
                 }
-                Err(err) => state.set(ConnectionState::Failed(err)),
+                Err(err) => connection_error.set(Some(err)),
             }
+            is_connecting.set(false);
         });
+    };
+
+    let disconnect = move |_| {
+        if let Some(former_client) = client() {
+            client.set(None);
+            snapshot.set(None);
+            connection_error.set(None);
+            spawn(disconnect_device(former_client));
+        }
     };
 
     rsx! {
@@ -109,88 +121,68 @@ fn App() -> Element {
                     h1 { "netprov" }
                     p { "BLE network provisioning" }
                 }
-                StatusPill { state: state_view.clone() }
-            }
-
-            section { class: "connection-panel",
-                label {
-                    span { "Peer" }
-                    input {
-                        value: "{current_peer}",
-                        placeholder: "{PEER_ID_HINT}",
-                        oninput: move |event| peer.set(event.value()),
-                    }
-                }
-                label {
-                    span { "PSK path" }
-                    input {
-                        value: "{current_key_path}",
-                        oninput: move |event| key_path.set(event.value()),
-                    }
-                }
-                div { class: "connection-actions",
-                    button {
-                        disabled: is_busy || is_scanning,
-                        onclick: scan,
-                        "Scan"
-                    }
-                    button {
-                        disabled: !can_connect,
-                        onclick: connect,
-                        "Connect"
-                    }
+                if client_view.is_some() {
+                    button { onclick: disconnect, "Disconnect" }
                 }
             }
 
-            section { class: "device-panel",
-                div { class: "panel-heading",
-                    h2 { "Devices" }
-                    ScanStatus { state: scan_state_view.clone(), count: devices_view.len() }
+            if client_view.is_none() {
+                section { class: "connection-panel",
+                    label {
+                        span { "Peer" }
+                        input {
+                            value: "{current_peer}",
+                            placeholder: "{PEER_ID_HINT}",
+                            oninput: move |event| {
+                                peer.set(event.value());
+                                selected_device.set(None);
+                            },
+                        }
+                    }
+                    label {
+                        span { "PSK path" }
+                        input {
+                            value: "{current_key_path}",
+                            oninput: move |event| key_path.set(event.value()),
+                        }
+                    }
+                    div { class: "connection-actions",
+                        button {
+                            disabled: is_busy || is_scanning,
+                            onclick: scan,
+                            "Scan"
+                        }
+                        button {
+                            disabled: !can_connect,
+                            onclick: connect,
+                            "Connect"
+                        }
+                    }
                 }
-                DeviceList {
-                    devices: devices_view,
-                    selected_peer: current_peer.clone(),
-                    disabled: is_busy,
-                    onselect: move |id: String| peer.set(id),
-                }
-            }
 
-            match state_view {
-                ConnectionState::Failed(ref message) => rsx! {
+                section { class: "device-panel",
+                    div { class: "panel-heading",
+                        h2 { "Devices" }
+                        ScanStatus { state: scan_state_view.clone(), count: devices_view.len() }
+                    }
+                    DeviceList {
+                        devices: devices_view,
+                        selected_peer,
+                        disabled: is_busy,
+                        onselect: move |device: DeviceSummary| {
+                            peer.set(device.id.clone());
+                            selected_device.set(Some(device));
+                        },
+                    }
+                }
+
+                if let Some(message) = connection_error_view {
                     div { class: "error-row", "{message}" }
-                },
-                _ => rsx! {},
-            }
-
-            if let Some(snapshot) = snapshot_view {
+                }
+            } else if let Some(snapshot) = snapshot_view {
                 Dashboard { snapshot }
-            } else {
-                EmptyState {}
             }
-        }
-    }
-}
 
-#[component]
-fn StatusPill(state: ConnectionState) -> Element {
-    let (class, label) = match state {
-        ConnectionState::Idle => ("status idle", "Disconnected"),
-        ConnectionState::Busy => ("status busy", "Connecting"),
-        ConnectionState::Ready => ("status ready", "Ready"),
-        ConnectionState::Failed(_) => ("status failed", "Error"),
-    };
-
-    rsx! {
-        div { class, "{label}" }
-    }
-}
-
-#[component]
-fn EmptyState() -> Element {
-    rsx! {
-        section { class: "empty-state",
-            h2 { "No device connected" }
-            p { "Select a BLE peer and connect to load network state." }
         }
     }
 }
@@ -216,9 +208,9 @@ fn ScanStatus(state: ScanState, count: usize) -> Element {
 #[component]
 fn DeviceList(
     devices: Vec<DeviceSummary>,
-    selected_peer: String,
+    selected_peer: Option<String>,
     disabled: bool,
-    onselect: EventHandler<String>,
+    onselect: EventHandler<DeviceSummary>,
 ) -> Element {
     if devices.is_empty() {
         return rsx! {
@@ -230,7 +222,7 @@ fn DeviceList(
         div { class: "device-list",
             for device in devices {
                 {
-                    let selected = device.id == selected_peer;
+                    let selected = selected_peer.as_deref() == Some(&device.id);
                     let row_class = if selected {
                         "device-row selected"
                     } else {
@@ -240,12 +232,12 @@ fn DeviceList(
                         .rssi
                         .map(|rssi| format!("{rssi} dBm"))
                         .unwrap_or_else(|| "RSSI -".to_string());
-                    let id = device.id.clone();
+                    let selected_device = device.clone();
                     rsx! {
                         button {
                             class: row_class,
                             disabled,
-                            onclick: move |_| onselect.call(id.clone()),
+                            onclick: move |_| onselect.call(selected_device.clone()),
                             div {
                                 strong { "{device.label}" }
                                 span { "{device.detail}" }
@@ -329,6 +321,7 @@ async fn scan_ble_devices() -> Result<Vec<DeviceSummary>, String> {
     Ok(devices.into_iter().map(DeviceSummary::from).collect())
 }
 
+#[allow(dead_code)] // Used by the provisioning form added in the next app slice.
 fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIpv4, String> {
     let address = address
         .trim()
@@ -362,6 +355,7 @@ fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIp
     })
 }
 
+#[allow(dead_code)] // Used by the provisioning form added in the next app slice.
 fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCredential, String> {
     if matches!(security, Some(Security::Open)) {
         return Ok(WifiCredential::Open);
@@ -379,47 +373,58 @@ fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCr
     }
 }
 
-async fn load_snapshot(peer: String, key_path: String) -> Result<DeviceSnapshot, String> {
+async fn connect_device(
+    peer: String,
+    key_path: String,
+) -> Result<(SharedClient, DeviceSnapshot), String> {
     if peer.trim().is_empty() {
         return Err("Peer identifier is required".into());
     }
-
     let key = tokio::fs::read(&key_path)
         .await
         .map_err(|err| format!("read {key_path}: {err}"))?;
     if key.len() != PSK_LEN {
         return Err(format!("key length is {}, expected {PSK_LEN}", key.len()));
     }
-    let mut psk = [0u8; PSK_LEN];
+    let mut psk = [0; PSK_LEN];
     psk.copy_from_slice(&key);
-
     let peer_id = parse_peer_id(peer.trim()).map_err(|err| err.to_string())?;
     let client = BleClient::connect(&peer_id)
         .await
         .map_err(|err| err.to_string())?;
-    let mut netprov = Netprov::new(client);
-    netprov
+    let mut client = Netprov::new(client);
+    client
         .authenticate(psk)
         .await
         .map_err(|err| err.to_string())?;
-    let interfaces = netprov
+    let snapshot = load_snapshot(&mut client).await?;
+    Ok((Arc::new(Mutex::new(client)), snapshot))
+}
+
+async fn load_snapshot(client: &mut Netprov<BleClient>) -> Result<DeviceSnapshot, String> {
+    let interfaces = client
         .list_interfaces()
         .await
         .map_err(|err| err.to_string())?;
     let mut interface_snapshots = Vec::with_capacity(interfaces.len());
     for interface in interfaces {
-        let config = netprov
+        let config = client
             .get_ip_config(interface.name.clone())
             .await
             .map_err(|err| err.to_string())?;
         interface_snapshots.push(InterfaceSnapshot { interface, config });
     }
-    let wifi_status = netprov.wifi_status().await.map_err(|err| err.to_string())?;
+    let wifi_status = client.wifi_status().await.map_err(|err| err.to_string())?;
 
     Ok(DeviceSnapshot {
         interfaces: interface_snapshots,
         wifi_status,
     })
+}
+
+async fn disconnect_device(client: SharedClient) {
+    let client = client.lock().await;
+    let _ = client.inner().disconnect().await;
 }
 
 impl From<BleDevice> for DeviceSummary {
@@ -436,6 +441,13 @@ impl From<BleDevice> for DeviceSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_empty_peer_before_connecting() {
+        let result = connect_device("  ".into(), "/key/is/not/read".into()).await;
+
+        assert!(matches!(result, Err(ref error) if error == "Peer identifier is required"));
+    }
 
     #[test]
     fn parses_static_ipv4_form() {

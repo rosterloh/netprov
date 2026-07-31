@@ -3,6 +3,7 @@ use crate::rate_limit::{CheckResult, RateLimiter};
 use netprov_protocol::*;
 use rand::Rng;
 use std::sync::Arc;
+use tracing::warn;
 
 pub async fn dispatch<F: NetworkFacade>(facade: &F, req: Request) -> Response {
     use netprov_protocol::{Op, OpResult};
@@ -26,7 +27,7 @@ pub async fn dispatch<F: NetworkFacade>(facade: &F, req: Request) -> Response {
         Op::WifiScan => facade
             .scan_wifi()
             .await
-            .map(OpResult::WifiNetworks)
+            .map(|nets| OpResult::WifiNetworks(bound_wifi_networks(nets, request_id)))
             .map_err(Into::into),
         Op::SetDhcp { iface } => facade
             .set_dhcp(&iface)
@@ -51,6 +52,50 @@ pub async fn dispatch<F: NetworkFacade>(facade: &F, req: Request) -> Response {
             .map_err(Into::into),
     };
     Response { request_id, result }
+}
+
+/// Drops the weakest networks until the encoded response fits under
+/// `MAX_MESSAGE_SIZE`.
+///
+/// A scan result carries ~60–80 CBOR bytes per AP, so somewhere north of 50
+/// visible networks — an office or a block of flats — pushed the response over
+/// the 4 KiB ceiling. `encode` then failed and the peer got
+/// "response too large to encode" instead of a network list, in exactly the
+/// crowded places where provisioning is most awkward (#16).
+///
+/// Strongest first, because the network someone is trying to join is almost
+/// always one they are standing near. The trial encode is the fitness test
+/// rather than a hardcoded count, so a handful of unusually long SSIDs cannot
+/// slip past a limit tuned for average ones. Popping one at a time is O(n)
+/// encodes of a ≤4 KiB buffer in the worst case, which is nothing next to the
+/// seconds the scan itself takes.
+fn bound_wifi_networks(mut nets: Vec<WifiNetwork>, request_id: u16) -> Vec<WifiNetwork> {
+    // Descending signal; `None` sorts weakest so unknown-strength APs are shed
+    // first.
+    nets.sort_by_key(|n| std::cmp::Reverse(n.signal));
+
+    let total = nets.len();
+    while !nets.is_empty() && !wifi_response_fits(&nets, request_id) {
+        nets.pop();
+    }
+    if nets.len() < total {
+        warn!(
+            total,
+            returned = nets.len(),
+            "truncated Wi-Fi scan to fit the message size limit"
+        );
+    }
+    nets
+}
+
+/// Whether `nets` encodes within the protocol's size limit, measured on the
+/// real `Response` so framing overhead is counted rather than estimated.
+fn wifi_response_fits(nets: &[WifiNetwork], request_id: u16) -> bool {
+    encode_response(&Response {
+        request_id,
+        result: Ok(OpResult::WifiNetworks(nets.to_vec())),
+    })
+    .is_ok()
 }
 
 pub struct Session<F: NetworkFacade> {
@@ -193,6 +238,65 @@ mod tests {
     fn payload(psk: &Psk, nonce: &Nonce) -> [u8; AUTH_PAYLOAD_LEN] {
         let client_nonce = [0xABu8; NONCE_LEN];
         auth_payload(&client_nonce, &client_tag(psk, nonce, &client_nonce))
+    }
+
+    fn net(i: usize, signal: u8) -> WifiNetwork {
+        WifiNetwork {
+            ssid: format!("network-{i:04}-with-a-realistically-long-name"),
+            signal: Some(signal),
+            security: Some(Security::Wpa2Psk),
+            bssid: format!("aa:bb:cc:dd:{:02x}:{:02x}", i / 256, i % 256),
+        }
+    }
+
+    /// #16: a dense environment used to blow the 4 KiB ceiling, so the peer got
+    /// an encode error instead of any networks at all.
+    #[test]
+    fn dense_scan_is_truncated_to_fit() {
+        let dense: Vec<_> = (0..200).map(|i| net(i, (i % 100) as u8)).collect();
+        let bounded = bound_wifi_networks(dense, 7);
+
+        assert!(!bounded.is_empty(), "must return something usable");
+        assert!(bounded.len() < 200, "must have shed some networks");
+        assert!(
+            encode_response(&Response {
+                request_id: 7,
+                result: Ok(OpResult::WifiNetworks(bounded.clone())),
+            })
+            .is_ok(),
+            "the whole point: the response now encodes"
+        );
+    }
+
+    /// The networks kept must be the strong ones — those are the ones the
+    /// operator is standing next to.
+    #[test]
+    fn truncation_keeps_the_strongest() {
+        let mut nets: Vec<_> = (0..200).map(|i| net(i, (i % 100) as u8)).collect();
+        nets.push(WifiNetwork {
+            ssid: "the-one-you-want".into(),
+            signal: Some(100),
+            security: Some(Security::Wpa2Psk),
+            bssid: "aa:bb:cc:dd:ee:ff".into(),
+        });
+
+        let bounded = bound_wifi_networks(nets, 1);
+        assert_eq!(
+            bounded.first().map(|n| n.ssid.as_str()),
+            Some("the-one-you-want")
+        );
+        let weakest_kept = bounded.last().unwrap().signal.unwrap();
+        assert!(
+            bounded.iter().all(|n| n.signal.unwrap() >= weakest_kept),
+            "kept set must be the top slice by signal"
+        );
+    }
+
+    /// A scan that already fits must come back untouched apart from ordering.
+    #[test]
+    fn small_scan_is_not_truncated() {
+        let few: Vec<_> = (0..5).map(|i| net(i, (i * 10) as u8)).collect();
+        assert_eq!(bound_wifi_networks(few, 1).len(), 5);
     }
 
     #[tokio::test]

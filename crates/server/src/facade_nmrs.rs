@@ -407,9 +407,15 @@ impl NetworkFacade for NmrsFacade {
                 .await
                 .map_err(nm_err)?;
                 let ssid_bytes: Vec<u8> = ap.get_property("Ssid").await.unwrap_or_default();
-                let ssid = String::from_utf8(ssid_bytes).unwrap_or_default();
+                // Lossy, not strict: an SSID is an arbitrary octet string, and
+                // `from_utf8(..).unwrap_or_default()` turned any network with
+                // non-UTF-8 bytes into an empty string that the hidden-network
+                // check below then discarded — so it never appeared in a scan
+                // at all (#16). Replacement characters at least make it
+                // visible and selectable.
+                let ssid = String::from_utf8_lossy(&ssid_bytes).into_owned();
                 if ssid.is_empty() {
-                    continue; // skip hidden networks
+                    continue; // genuinely hidden: no SSID broadcast
                 }
                 let strength: u8 = ap.get_property("Strength").await.unwrap_or(0);
                 let flags: u32 = ap.get_property("Flags").await.unwrap_or(0);

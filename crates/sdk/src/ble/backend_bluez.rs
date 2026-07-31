@@ -280,10 +280,16 @@ impl ProvisioningClient for BleClient {
 /// authentication failure so callers get `AuthFailed` instead of an opaque
 /// `Ble(..)` D-Bus string.
 fn map_auth_write_err(e: bluer::Error) -> SdkError {
-    if e.kind == bluer::ErrorKind::NotAuthorized {
-        SdkError::AuthFailed
-    } else {
-        SdkError::from(e)
+    match e.kind {
+        bluer::ErrorKind::NotAuthorized => SdkError::AuthFailed,
+        // The server answers a locked-out peer with `NotPermitted` rather than
+        // `NotAuthorized`, so "wait" and "wrong key" are distinguishable (#18).
+        // ATT carries no payload with an error code, so the remaining time
+        // stays in the server's log.
+        bluer::ErrorKind::NotPermitted => SdkError::RateLimited {
+            retry_after_seconds: None,
+        },
+        _ => SdkError::from(e),
     }
 }
 

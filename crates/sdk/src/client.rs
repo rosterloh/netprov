@@ -69,6 +69,13 @@ where
                     n
                 }
                 Envelope::AuthFail => return Err(SdkError::AuthFailed),
+                Envelope::AuthRateLimited {
+                    retry_after_seconds,
+                } => {
+                    return Err(SdkError::RateLimited {
+                        retry_after_seconds: Some(retry_after_seconds),
+                    });
+                }
                 _ => return Err(SdkError::UnexpectedMessage("expected NonceReply")),
             };
             let client_nonce = random_nonce();
@@ -89,6 +96,11 @@ where
                     Ok(())
                 }
                 Envelope::AuthFail => Err(SdkError::AuthFailed),
+                Envelope::AuthRateLimited {
+                    retry_after_seconds,
+                } => Err(SdkError::RateLimited {
+                    retry_after_seconds: Some(retry_after_seconds),
+                }),
                 _ => Err(SdkError::UnexpectedMessage("expected AuthOk/AuthFail")),
             }
         })

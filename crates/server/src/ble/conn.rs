@@ -6,11 +6,11 @@
 
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
-use crate::session::{Session, dispatch};
+use crate::session::{AuthOutcome, Session, dispatch};
 use netprov_protocol::{
     AUTH_PAYLOAD_LEN, BoundedString, InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE,
-    PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, decode_request,
-    encode_response, fragment, parse_frame,
+    PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, SUPPORTED_OPS_ALL,
+    decode_request, encode_response, fragment, parse_frame,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,6 +26,22 @@ use tracing::{debug, warn};
 /// run_ble_server and issue #13).
 pub type NotifyTx = mpsc::UnboundedSender<(String, Vec<u8>)>;
 pub type NotifyRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
+
+/// The Info characteristic's payload: constant for a given model.
+///
+/// A free function because Info is served without a session. Reading it used
+/// to mint (and so evict) one, which let any device in radio range end an
+/// operator's authenticated session with a single unencrypted read (#14).
+pub fn info_payload(model: &str) -> Vec<u8> {
+    let payload = InfoPayload {
+        protocol_version: PROTOCOL_VERSION,
+        supported_ops: SUPPORTED_OPS_ALL,
+        model: model.to_string(),
+    };
+    let mut bytes = Vec::with_capacity(64);
+    ciborium::into_writer(&payload, &mut bytes).expect("InfoPayload encodes");
+    bytes
+}
 
 pub struct PeerSession<F: NetworkFacade> {
     /// Id of the peer this session serves (its BLE address, debug-formatted).
@@ -92,14 +108,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
 
     /// Info read handler — unauthenticated. Encodes a CBOR InfoPayload.
     pub fn on_info(&self) -> Vec<u8> {
-        let payload = InfoPayload {
-            protocol_version: PROTOCOL_VERSION,
-            supported_ops: 0x7F, // bits 0..=6 → all 7 v1 ops
-            model: self.model.clone(),
-        };
-        let mut bytes = Vec::with_capacity(64);
-        ciborium::into_writer(&payload, &mut bytes).expect("InfoPayload encodes");
-        bytes
+        info_payload(&self.model)
     }
 
     /// ChallengeNonce read handler — generates fresh nonce, invalidates any prior.
@@ -107,23 +116,24 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().issue_nonce().to_vec()
     }
 
-    /// AuthResponse write handler — returns true on success, and stashes the
-    /// server's own tag for the peer to read back from the same
-    /// characteristic (see [`Self::on_auth_read`]).
-    pub fn on_auth(&self, payload: Vec<u8>) -> bool {
+    /// AuthResponse write handler. On success it stashes the server's own tag
+    /// for the peer to read back from the same characteristic (see
+    /// [`Self::on_auth_read`]).
+    ///
+    /// The outcome is returned rather than a bare bool so the GATT layer can
+    /// answer a locked-out peer with a different ATT error than a wrong key
+    /// (#18).
+    pub fn on_auth(&self, payload: Vec<u8>) -> AuthOutcome {
         if payload.len() != AUTH_PAYLOAD_LEN {
-            return false;
+            *self.server_tag.lock().unwrap() = None;
+            return AuthOutcome::BadTag;
         }
-        match self.session.lock().unwrap().submit_auth(&payload) {
-            Some(tag) => {
-                *self.server_tag.lock().unwrap() = Some(tag);
-                true
-            }
-            None => {
-                *self.server_tag.lock().unwrap() = None;
-                false
-            }
-        }
+        let outcome = self.session.lock().unwrap().submit_auth(&payload);
+        *self.server_tag.lock().unwrap() = match &outcome {
+            AuthOutcome::Ok(tag) => Some(*tag),
+            _ => None,
+        };
+        outcome
     }
 
     /// AuthResponse read handler — the server's proof that it holds the PSK.
@@ -300,7 +310,7 @@ mod tests {
         let psk = [0x11u8; PSK_LEN];
         let client_nonce = [0x77u8; NONCE_LEN];
         let payload = auth_payload(&client_nonce, &client_tag(&psk, &nonce, &client_nonce));
-        assert!(peer.on_auth(payload.to_vec()));
+        assert!(matches!(peer.on_auth(payload.to_vec()), AuthOutcome::Ok(_)));
         // The server's proof must be published for the peer to read back, and
         // must verify — the client refuses the session otherwise.
         let server = peer.on_auth_read().expect("server tag published");
@@ -320,7 +330,7 @@ mod tests {
             &client_nonce,
             &client_tag(&[0xEEu8; PSK_LEN], &nonce, &client_nonce),
         );
-        assert!(!peer.on_auth(wrong.to_vec()));
+        assert_eq!(peer.on_auth(wrong.to_vec()), AuthOutcome::BadTag);
         assert!(peer.on_auth_read().is_none());
     }
 

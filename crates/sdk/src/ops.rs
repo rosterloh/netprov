@@ -37,6 +37,13 @@ pub enum SdkError {
     AuthFailed,
     #[error("server failed to prove it holds the PSK — possible impersonation")]
     ServerAuthFailed,
+    /// Too many failed attempts. `retry_after_seconds` is `None` on transports
+    /// that cannot carry it (BLE: an ATT error code has no payload).
+    #[error("rate limited{}", match .retry_after_seconds {
+        Some(s) => format!(" — retry in {s}s"),
+        None => " — wait before retrying".to_string(),
+    })]
+    RateLimited { retry_after_seconds: Option<u32> },
     #[error("operation timed out after {0:?}")]
     Timeout(Duration),
     #[error("unexpected server message: {0}")]

@@ -1,6 +1,7 @@
 //! Construct the bluer Application describing netprov's GATT service.
 
 use super::uuids::{AUTH_RESPONSE_UUID, CHALLENGE_UUID, INFO_UUID, REQUEST_UUID, SERVICE_UUID};
+use crate::session::AuthOutcome;
 use bluer::Address;
 use bluer::gatt::local::{
     Application, Characteristic, CharacteristicControl, CharacteristicNotify,
@@ -16,7 +17,7 @@ use std::sync::Arc;
 pub struct GattHandlers {
     pub on_info_read: Arc<dyn Fn(Address) -> Vec<u8> + Send + Sync>,
     pub on_nonce_read: Arc<dyn Fn(Address) -> Vec<u8> + Send + Sync>,
-    pub on_auth_write: Arc<dyn Fn(Address, Vec<u8>) -> bool + Send + Sync>,
+    pub on_auth_write: Arc<dyn Fn(Address, Vec<u8>) -> AuthOutcome + Send + Sync>,
     /// Serves the server's auth tag. `None` until this peer's own tag has
     /// verified.
     pub on_auth_read: Arc<dyn Fn(Address) -> Option<Vec<u8>> + Send + Sync>,
@@ -94,12 +95,21 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                         write_without_response: false,
                         encrypt_write: true,
                         method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
-                            let ok = (auth_write)(req.device_address, value);
+                            let outcome = (auth_write)(req.device_address, value);
                             Box::pin(async move {
-                                if ok {
-                                    Ok(())
-                                } else {
-                                    Err(bluer::gatt::local::ReqError::NotAuthorized)
+                                match outcome {
+                                    AuthOutcome::Ok(_) => Ok(()),
+                                    // Distinct errors so a locked-out operator
+                                    // is not told their key is wrong (#18).
+                                    // ATT cannot carry the remaining time, so
+                                    // the duration stays server-side in the
+                                    // log; the client learns only *why*.
+                                    AuthOutcome::BadTag => {
+                                        Err(bluer::gatt::local::ReqError::NotAuthorized)
+                                    }
+                                    AuthOutcome::Locked { .. } => {
+                                        Err(bluer::gatt::local::ReqError::NotPermitted)
+                                    }
                                 }
                             })
                         })),
@@ -180,7 +190,7 @@ mod tests {
         let handlers = GattHandlers {
             on_info_read: Arc::new(|_| Vec::new()),
             on_nonce_read: Arc::new(|_| Vec::new()),
-            on_auth_write: Arc::new(|_, _| true),
+            on_auth_write: Arc::new(|_, _| AuthOutcome::Ok([0u8; 32])),
             on_auth_read: Arc::new(|_| None),
             on_request_write: Arc::new(|_| {}),
         };

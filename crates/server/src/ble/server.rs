@@ -4,6 +4,7 @@ use super::conn::{NotifyRx, NotifyTx, PeerSession};
 use super::gatt::{GattHandlers, build_application};
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
+use crate::session::AuthOutcome;
 use bluer::{
     Adapter, Address, Session as BluerSession,
     adv::{Advertisement, Type as AdvType},
@@ -38,9 +39,17 @@ type BuiltHandlers<F> = (PeerTable<F>, NotifyTx, NotifyRx, GattHandlers);
 
 /// Returns the `PeerSession` for `addr`, reusing the one already installed in
 /// `current` if it belongs to the same peer, or minting a fresh one
-/// otherwise. Called from every GATT entry point (Info/ChallengeNonce read,
-/// AuthResponse write, notify subscribe) so session creation never depends on
-/// the order in which a client happens to touch the characteristics.
+/// otherwise. Called from the GATT entry points that legitimately begin or
+/// continue a handshake (ChallengeNonce read, AuthResponse write, notify
+/// subscribe) so session creation never depends on the order in which a
+/// client happens to touch the characteristics. Info is served without a
+/// session, so it is not among them.
+///
+/// Returns `None` when a *different* peer already holds an authenticated
+/// session. v1 is deliberately single-peer, but eviction must cost more than
+/// touching a characteristic: otherwise any device in radio range could end an
+/// operator's session mid-provisioning, repeatedly and unauthenticated (#14).
+/// An unauthenticated session is still displaced freely — nothing is lost.
 fn get_or_create_peer<F: NetworkFacade + 'static>(
     current: &PeerTable<F>,
     addr: Address,
@@ -49,13 +58,21 @@ fn get_or_create_peer<F: NetworkFacade + 'static>(
     rate_limiter: &Arc<RateLimiter>,
     model: &str,
     notify_tx: &NotifyTx,
-) -> Arc<PeerSession<F>> {
+) -> Option<Arc<PeerSession<F>>> {
     let peer_id = format!("{addr:?}");
     let mut guard = current.lock().unwrap();
-    if let Some((existing_id, session)) = guard.as_ref()
-        && *existing_id == peer_id
-    {
-        return session.clone();
+    if let Some((existing_id, session)) = guard.as_ref() {
+        if *existing_id == peer_id {
+            return Some(session.clone());
+        }
+        if session.session.lock().unwrap().is_authenticated() {
+            warn!(
+                peer = %peer_id,
+                holder = %existing_id,
+                "refusing to displace an authenticated peer"
+            );
+            return None;
+        }
     }
     let session = PeerSession::new(
         psk,
@@ -67,7 +84,7 @@ fn get_or_create_peer<F: NetworkFacade + 'static>(
     );
     info!(peer = %peer_id, "peer session started");
     *guard = Some((peer_id, session.clone()));
-    session
+    Some(session)
 }
 
 /// Asks BlueZ to bond with `addr` unless it already has.
@@ -134,36 +151,24 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
     let current: PeerTable<F> = Arc::new(Default::default());
     let (notify_tx, notify_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
-    let cur_info = current.clone();
     let cur_nonce = current.clone();
     let cur_auth = current.clone();
     let cur_auth_read = current.clone();
     let cur_req = current.clone();
-    let facade_info = facade.clone();
     let facade_nonce = facade.clone();
     let facade_auth = facade;
-    let rl_info = rate_limiter.clone();
     let rl_nonce = rate_limiter.clone();
     let rl_auth = rate_limiter;
     let model_info = model.clone();
     let model_nonce = model.clone();
     let model_auth = model;
-    let notify_tx_info = notify_tx.clone();
     let notify_tx_nonce = notify_tx.clone();
     let notify_tx_auth = notify_tx.clone();
     let handlers = GattHandlers {
-        on_info_read: Arc::new(move |addr| {
-            get_or_create_peer(
-                &cur_info,
-                addr,
-                psk,
-                &facade_info,
-                &rl_info,
-                &model_info,
-                &notify_tx_info,
-            )
-            .on_info()
-        }),
+        // Stateless: Info is a constant payload per model, and minting a
+        // session here is what made an unencrypted read a denial-of-service
+        // primitive (#14).
+        on_info_read: Arc::new(move |_addr| super::conn::info_payload(&model_info)),
         on_nonce_read: Arc::new(move |addr| {
             get_or_create_peer(
                 &cur_nonce,
@@ -174,7 +179,10 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
                 &model_nonce,
                 &notify_tx_nonce,
             )
-            .on_nonce()
+            .map(|p| p.on_nonce())
+            // Another peer is mid-session; hand back no nonce rather than
+            // taking theirs over. The client sees a short read and fails.
+            .unwrap_or_default()
         }),
         on_auth_write: Arc::new(move |addr, value| {
             get_or_create_peer(
@@ -186,7 +194,8 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
                 &model_auth,
                 &notify_tx_auth,
             )
-            .on_auth(value)
+            .map(|p| p.on_auth(value))
+            .unwrap_or(AuthOutcome::BadTag)
         }),
         // Deliberately does *not* mint a session: a read with no prior
         // successful write has nothing to serve, and creating one here would
@@ -324,9 +333,13 @@ where
                         {
                             end_peer_session(&current, &prev_id, &prev_session);
                         }
-                        let peer = get_or_create_peer(
+                        let Some(peer) = get_or_create_peer(
                             &current, addr, psk, &facade, &rate_limiter, &model, &notify_tx,
-                        );
+                        ) else {
+                            // Another peer is authenticated; ignore this
+                            // subscribe rather than stealing their session.
+                            continue;
+                        };
                         // The writer's MTU is only known once the peer has
                         // subscribed; plumb it into the PeerSession so
                         // on_request's dispatch fragments responses to what this
@@ -445,7 +458,10 @@ mod tests {
         let client_nonce = [0x99u8; NONCE_LEN];
         let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
         let authed = (handlers.on_auth_write)(addr, payload.to_vec());
-        assert!(authed, "auth should succeed pre-subscribe");
+        assert!(
+            matches!(authed, AuthOutcome::Ok(_)),
+            "auth should succeed pre-subscribe"
+        );
         let server = (handlers.on_auth_read)(addr).expect("server tag readable after auth");
         assert!(
             verify_server_tag(&psk, &n, &client_nonce, &server),
@@ -462,7 +478,8 @@ mod tests {
             &rate_limiter,
             "test-model",
             &notify_tx,
-        );
+        )
+        .expect("same peer keeps its session");
         assert!(
             peer.session.lock().unwrap().is_authenticated(),
             "subscribe must reuse the authenticated session, not replace it"
@@ -528,7 +545,8 @@ mod tests {
             &rate_limiter,
             "m",
             &notify_tx,
-        );
+        )
+        .expect("first peer takes the slot");
         // B authenticates before A's departure is observed → B replaces
         // `current`. A is now the departing peer whose loop hasn't yet seen
         // the disconnect.
@@ -540,7 +558,8 @@ mod tests {
             &rate_limiter,
             "m",
             &notify_tx,
-        );
+        )
+        .expect("A never authenticated, so B may displace it");
 
         // A's belated teardown must leave B's session intact.
         end_peer_session(&current, &a_id, &a);
@@ -555,6 +574,63 @@ mod tests {
         );
     }
 
+    /// #14: an authenticated operator must survive anything a passer-by can do
+    /// without the PSK — the Info read that named the issue, and the nonce read
+    /// and auth write too.
+    #[test]
+    fn stranger_cannot_evict_an_authenticated_peer() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let (current, _notify_tx, _notify_rx, handlers) =
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+
+        let operator = Address::new([1, 2, 3, 4, 5, 6]);
+        let operator_id = format!("{operator:?}");
+        let stranger = Address::new([9, 9, 9, 9, 9, 9]);
+
+        // Operator authenticates.
+        let nonce = (handlers.on_nonce_read)(operator);
+        let mut n = [0u8; NONCE_LEN];
+        n.copy_from_slice(&nonce);
+        let client_nonce = [0x55u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
+        assert!(matches!(
+            (handlers.on_auth_write)(operator, payload.to_vec()),
+            AuthOutcome::Ok(_)
+        ));
+
+        let still_ours = || {
+            let guard = current.lock().unwrap();
+            let (id, session) = guard.as_ref().expect("session must still exist");
+            assert_eq!(*id, operator_id, "operator must still hold the slot");
+            assert!(
+                session.session.lock().unwrap().is_authenticated(),
+                "operator must still be authenticated"
+            );
+        };
+
+        // The attack from the issue: a bare Info read. Served, but stateless.
+        let info = (handlers.on_info_read)(stranger);
+        assert!(!info.is_empty(), "Info stays open to anyone");
+        still_ours();
+
+        // A nonce read from the stranger is refused rather than served by
+        // taking the operator's session over.
+        assert!(
+            (handlers.on_nonce_read)(stranger).is_empty(),
+            "no nonce while another peer is authenticated"
+        );
+        still_ours();
+
+        // And so is an auth attempt.
+        assert_eq!(
+            (handlers.on_auth_write)(stranger, payload.to_vec()),
+            AuthOutcome::BadTag
+        );
+        still_ours();
+    }
+
     /// Ending the peer that `current` still points at clears the table, so the
     /// next peer starts from a clean slate.
     #[test]
@@ -567,7 +643,8 @@ mod tests {
 
         let addr = Address::new([1, 2, 3, 4, 5, 6]);
         let id = format!("{addr:?}");
-        let peer = get_or_create_peer(&current, addr, psk, &facade, &rate_limiter, "m", &notify_tx);
+        let peer = get_or_create_peer(&current, addr, psk, &facade, &rate_limiter, "m", &notify_tx)
+            .expect("empty slot");
 
         end_peer_session(&current, &id, &peer);
 

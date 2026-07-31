@@ -27,6 +27,22 @@ use tracing::{debug, warn};
 pub type NotifyTx = mpsc::UnboundedSender<(String, Vec<u8>)>;
 pub type NotifyRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
 
+/// The Info characteristic's payload: constant for a given model.
+///
+/// A free function because Info is served without a session. Reading it used
+/// to mint (and so evict) one, which let any device in radio range end an
+/// operator's authenticated session with a single unencrypted read (#14).
+pub fn info_payload(model: &str) -> Vec<u8> {
+    let payload = InfoPayload {
+        protocol_version: PROTOCOL_VERSION,
+        supported_ops: SUPPORTED_OPS_ALL,
+        model: model.to_string(),
+    };
+    let mut bytes = Vec::with_capacity(64);
+    ciborium::into_writer(&payload, &mut bytes).expect("InfoPayload encodes");
+    bytes
+}
+
 pub struct PeerSession<F: NetworkFacade> {
     /// Id of the peer this session serves (its BLE address, debug-formatted).
     /// Frames pushed to `notify_tx` are tagged with this so the notify writer
@@ -92,14 +108,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
 
     /// Info read handler — unauthenticated. Encodes a CBOR InfoPayload.
     pub fn on_info(&self) -> Vec<u8> {
-        let payload = InfoPayload {
-            protocol_version: PROTOCOL_VERSION,
-            supported_ops: SUPPORTED_OPS_ALL,
-            model: self.model.clone(),
-        };
-        let mut bytes = Vec::with_capacity(64);
-        ciborium::into_writer(&payload, &mut bytes).expect("InfoPayload encodes");
-        bytes
+        info_payload(&self.model)
     }
 
     /// ChallengeNonce read handler — generates fresh nonce, invalidates any prior.
@@ -301,7 +310,7 @@ mod tests {
         let psk = [0x11u8; PSK_LEN];
         let client_nonce = [0x77u8; NONCE_LEN];
         let payload = auth_payload(&client_nonce, &client_tag(&psk, &nonce, &client_nonce));
-        assert!(peer.on_auth(payload.to_vec()));
+        assert!(matches!(peer.on_auth(payload.to_vec()), AuthOutcome::Ok(_)));
         // The server's proof must be published for the peer to read back, and
         // must verify — the client refuses the session otherwise.
         let server = peer.on_auth_read().expect("server tag published");
@@ -321,7 +330,7 @@ mod tests {
             &client_nonce,
             &client_tag(&[0xEEu8; PSK_LEN], &nonce, &client_nonce),
         );
-        assert!(!peer.on_auth(wrong.to_vec()));
+        assert_eq!(peer.on_auth(wrong.to_vec()), AuthOutcome::BadTag);
         assert!(peer.on_auth_read().is_none());
     }
 

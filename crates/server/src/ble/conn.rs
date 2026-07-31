@@ -8,9 +8,9 @@ use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use crate::session::{Session, dispatch};
 use netprov_protocol::{
-    BoundedString, InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE, PROTOCOL_VERSION, PSK_LEN,
-    ProtocolError, Reassembler, Request, Response, TAG_LEN, decode_request, encode_response,
-    fragment, parse_frame,
+    AUTH_PAYLOAD_LEN, BoundedString, InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE,
+    PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, decode_request,
+    encode_response, fragment, parse_frame,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,10 @@ pub struct PeerSession<F: NetworkFacade> {
     /// Defaults to `MAX_FRAME_LEN` so a response dispatched before subscribe
     /// completes still fragments to a safe ceiling.
     pub mtu: AtomicUsize,
+    /// The server's auth tag for this session, published on the AuthResponse
+    /// characteristic's read once the peer's own tag has verified. `None`
+    /// until then, and cleared on any failed attempt.
+    server_tag: Mutex<Option<netprov_protocol::Tag>>,
     /// Handles to in-flight dispatch tasks plus a "closed" flag, guarded by a
     /// single lock so `on_request`'s spawn-then-push can never race past
     /// `abort_handles`'s set-then-drain. Without this, a write arriving via
@@ -72,6 +76,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             notify_tx,
             model,
             mtu: AtomicUsize::new(MAX_FRAME_LEN),
+            server_tag: Mutex::new(None),
             dispatch_state: Mutex::new(DispatchState {
                 closed: false,
                 handles: Vec::new(),
@@ -102,12 +107,35 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
         self.session.lock().unwrap().issue_nonce().to_vec()
     }
 
-    /// AuthResponse write handler — returns true on success.
-    pub fn on_auth(&self, tag: Vec<u8>) -> bool {
-        if tag.len() != TAG_LEN {
+    /// AuthResponse write handler — returns true on success, and stashes the
+    /// server's own tag for the peer to read back from the same
+    /// characteristic (see [`Self::on_auth_read`]).
+    pub fn on_auth(&self, payload: Vec<u8>) -> bool {
+        if payload.len() != AUTH_PAYLOAD_LEN {
             return false;
         }
-        self.session.lock().unwrap().submit_auth(&tag)
+        match self.session.lock().unwrap().submit_auth(&payload) {
+            Some(tag) => {
+                *self.server_tag.lock().unwrap() = Some(tag);
+                true
+            }
+            None => {
+                *self.server_tag.lock().unwrap() = None;
+                false
+            }
+        }
+    }
+
+    /// AuthResponse read handler — the server's proof that it holds the PSK.
+    ///
+    /// Only ever populated after a client tag verified, so an unauthenticated
+    /// peer reading this learns nothing.
+    pub fn on_auth_read(&self) -> Option<Vec<u8>> {
+        self.server_tag
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|tag| tag.to_vec())
     }
 
     /// Aborts all in-flight dispatch tasks and marks the session closed so
@@ -246,8 +274,8 @@ mod tests {
     use crate::facade_mock::MockFacade;
     use crate::rate_limit::RateLimiter;
     use netprov_protocol::{
-        FRAME_HEADER_LEN, NONCE_LEN, Op, Request, decode_response, encode_request, fragment,
-        hmac_compute,
+        FRAME_HEADER_LEN, NONCE_LEN, Op, Request, auth_payload, client_tag, decode_response,
+        encode_request, fragment, verify_server_tag,
     };
 
     fn new_peer() -> (Arc<PeerSession<MockFacade>>, NotifyRx) {
@@ -269,8 +297,38 @@ mod tests {
         let nonce_bytes = peer.on_nonce();
         let mut nonce = [0u8; NONCE_LEN];
         nonce.copy_from_slice(&nonce_bytes);
-        let tag = hmac_compute(&[0x11u8; PSK_LEN], &nonce);
-        assert!(peer.on_auth(tag.to_vec()));
+        let psk = [0x11u8; PSK_LEN];
+        let client_nonce = [0x77u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &nonce, &client_nonce));
+        assert!(peer.on_auth(payload.to_vec()));
+        // The server's proof must be published for the peer to read back, and
+        // must verify — the client refuses the session otherwise.
+        let server = peer.on_auth_read().expect("server tag published");
+        assert!(verify_server_tag(&psk, &nonce, &client_nonce, &server));
+    }
+
+    /// A failed attempt must not leave a readable server tag behind, or a peer
+    /// with the wrong PSK could still be told "this is the real device".
+    #[test]
+    fn failed_auth_publishes_no_server_tag() {
+        let (peer, _rx) = new_peer();
+        let nonce_bytes = peer.on_nonce();
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce.copy_from_slice(&nonce_bytes);
+        let client_nonce = [0x77u8; NONCE_LEN];
+        let wrong = auth_payload(
+            &client_nonce,
+            &client_tag(&[0xEEu8; PSK_LEN], &nonce, &client_nonce),
+        );
+        assert!(!peer.on_auth(wrong.to_vec()));
+        assert!(peer.on_auth_read().is_none());
+    }
+
+    /// Reading the server tag before any write must yield nothing.
+    #[test]
+    fn no_server_tag_before_auth() {
+        let (peer, _rx) = new_peer();
+        assert!(peer.on_auth_read().is_none());
     }
 
     /// Drains the notify channel and reassembles the single response the
@@ -385,11 +443,7 @@ mod tests {
         let (peer, mut notify_rx) = new_peer();
 
         // Authenticate, as a real client would before writing a request.
-        let nonce_bytes = peer.on_nonce();
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(&nonce_bytes);
-        let tag = hmac_compute(&[0x11u8; PSK_LEN], &nonce);
-        assert!(peer.on_auth(tag.to_vec()));
+        authenticate(&peer);
 
         // Simulate the disconnect path: the peer session is torn down and
         // all in-flight handles aborted *before* the stray write below

@@ -99,34 +99,41 @@ impl<F: NetworkFacade> Session<F> {
         nonce
     }
 
-    /// Called when peer writes `AuthResponse`. Consumes the nonce regardless of
-    /// outcome. Returns `true` if auth succeeded.
-    pub fn submit_auth(&mut self, tag: &[u8]) -> bool {
-        if matches!(
-            self.rate_limiter.check(&self.peer_id),
-            CheckResult::Locked { .. }
-        ) {
-            return false;
-        }
-        let (nonce_pending, nonce) = match &self.state {
+    /// Called when peer writes `AuthResponse`. `payload` is the client nonce
+    /// followed by the client tag. Consumes the nonce regardless of outcome.
+    ///
+    /// Returns the server's own tag on success, for the peer to verify. The
+    /// tag is only ever computed after the client's tag has been checked, so
+    /// it cannot be used as a PSK oracle.
+    pub fn submit_auth(&mut self, payload: &[u8]) -> Option<Tag> {
+        // Consume the pending nonce first, so a lockout cannot park a still-
+        // valid nonce for the whole window and let the first attempt after it
+        // expires spend it (#19).
+        let pending = match &self.state {
             SessionAuthState::Unauthenticated {
                 pending_nonce: Some(n),
-            } => (true, *n),
-            _ => (false, [0u8; NONCE_LEN]),
+            } => Some(*n),
+            _ => None,
         };
         self.state = SessionAuthState::Unauthenticated {
             pending_nonce: None,
         };
-        if !nonce_pending {
-            return false;
+        if matches!(
+            self.rate_limiter.check(&self.peer_id),
+            CheckResult::Locked { .. }
+        ) {
+            return None;
         }
-        if hmac_verify(&self.psk, &nonce, tag) {
+        let server_nonce = pending?;
+        let (client_nonce, tag) = split_auth_payload(payload)?;
+
+        if verify_client_tag(&self.psk, &server_nonce, &client_nonce, tag) {
             self.state = SessionAuthState::Authenticated;
             self.rate_limiter.record_success(&self.peer_id);
-            true
+            Some(server_tag(&self.psk, &server_nonce, &client_nonce))
         } else {
             self.rate_limiter.record_failure(&self.peer_id);
-            false
+            None
         }
     }
 
@@ -153,6 +160,17 @@ impl<F: NetworkFacade> Session<F> {
     pub fn peer_id_for_log(&self) -> &str {
         &self.peer_id
     }
+
+    /// Whether a nonce is still awaiting an `AuthResponse`. Test-only: the
+    /// nonce-consumption rule in `submit_auth` has no other observable effect
+    /// while a peer is locked out.
+    #[cfg(test)]
+    fn pending_nonce(&self) -> Option<Nonce> {
+        match &self.state {
+            SessionAuthState::Unauthenticated { pending_nonce } => *pending_nonce,
+            SessionAuthState::Authenticated => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +189,12 @@ mod tests {
         (psk, s)
     }
 
+    /// Valid `AuthSubmit` payload for `nonce`, with a fixed client nonce.
+    fn payload(psk: &Psk, nonce: &Nonce) -> [u8; AUTH_PAYLOAD_LEN] {
+        let client_nonce = [0xABu8; NONCE_LEN];
+        auth_payload(&client_nonce, &client_tag(psk, nonce, &client_nonce))
+    }
+
     #[tokio::test]
     async fn unauth_rejects_request() {
         let (_psk, s) = fixture();
@@ -186,8 +210,7 @@ mod tests {
     async fn auth_flow_then_list() {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
-        let tag = hmac_compute(&psk, &nonce);
-        assert!(s.submit_auth(&tag));
+        assert!(s.submit_auth(&payload(&psk, &nonce)).is_some());
         let resp = s
             .handle_request(Request {
                 request_id: 1,
@@ -201,27 +224,79 @@ mod tests {
     async fn wrong_tag_stays_unauth() {
         let (_psk, mut s) = fixture();
         s.issue_nonce();
-        assert!(!s.submit_auth(&[0u8; TAG_LEN]));
+        assert!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]).is_none());
         assert!(!s.is_authenticated());
+    }
+
+    /// The tag the server returns must verify under the client's own check,
+    /// or a correct client would reject a correct server.
+    #[tokio::test]
+    async fn server_tag_verifies_client_side() {
+        let (psk, mut s) = fixture();
+        let nonce = s.issue_nonce();
+        let client_nonce = [0xABu8; NONCE_LEN];
+        let tag = s
+            .submit_auth(&auth_payload(
+                &client_nonce,
+                &client_tag(&psk, &nonce, &client_nonce),
+            ))
+            .expect("auth succeeds");
+        assert!(verify_server_tag(&psk, &nonce, &client_nonce, &tag));
+        // And it must not be the client's own tag echoed back.
+        assert!(!verify_client_tag(&psk, &nonce, &client_nonce, &tag));
+    }
+
+    /// A payload that isn't exactly nonce+tag is rejected outright rather than
+    /// being padded or truncated into something that might verify.
+    #[tokio::test]
+    async fn malformed_payload_rejected() {
+        let (psk, mut s) = fixture();
+        let nonce = s.issue_nonce();
+        let good = payload(&psk, &nonce);
+        assert!(s.submit_auth(&good[..AUTH_PAYLOAD_LEN - 1]).is_none());
+        assert!(!s.is_authenticated());
+    }
+
+    /// #19: a nonce issued just before lockout must not survive the lockout
+    /// window, or the first attempt after it expires could still spend it.
+    #[tokio::test]
+    async fn lockout_still_consumes_pending_nonce() {
+        let psk = [9u8; PSK_LEN];
+        let limiter = Arc::new(RateLimiter::with_defaults());
+        let mut s = Session::new(
+            psk,
+            "peer-A".into(),
+            Arc::new(MockFacade::new()),
+            limiter.clone(),
+        );
+        let nonce = s.issue_nonce();
+        for _ in 0..5 {
+            limiter.record_failure("peer-A");
+        }
+        // Refused because the peer is locked out, not because the tag is bad.
+        assert!(s.submit_auth(&payload(&psk, &nonce)).is_none());
+        assert!(
+            s.pending_nonce().is_none(),
+            "lockout must still consume the pending nonce"
+        );
     }
 
     #[tokio::test]
     async fn nonce_is_single_use() {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
-        let tag = hmac_compute(&psk, &nonce);
+        let good = payload(&psk, &nonce);
         // Wrong first attempt consumes the nonce.
-        assert!(!s.submit_auth(&[0u8; TAG_LEN]));
+        assert!(s.submit_auth(&[0u8; AUTH_PAYLOAD_LEN]).is_none());
         // Second attempt with the correct tag but stale nonce must fail.
-        assert!(!s.submit_auth(&tag));
+        assert!(s.submit_auth(&good).is_none());
     }
 
     #[tokio::test]
     async fn static_ip_validation_runs() {
         let (psk, mut s) = fixture();
         let nonce = s.issue_nonce();
-        let tag = hmac_compute(&psk, &nonce);
-        s.submit_auth(&tag);
+        s.submit_auth(&payload(&psk, &nonce));
         let bad = StaticIpv4 {
             address: "224.0.0.1/24".parse().unwrap(),
             gateway: None,

@@ -55,6 +55,12 @@ jobs:
       - name: clippy (client ble)
         run: cargo clippy -p netprov-client --features ble --all-targets -- -D warnings
 
+      # Forces the portable btleplug backend on Linux. The macOS job below is
+      # the real target, but running it here too keeps that code under -D
+      # warnings on every push, not just on the macOS runner.
+      - name: clippy (client ble-btleplug)
+        run: cargo clippy -p netprov-client --features ble-btleplug --all-targets -- -D warnings
+
       - name: clippy (app desktop)
         if: matrix.runner == 'ubuntu-latest'
         run: cargo clippy -p netprov-app --features desktop --all-targets -- -D warnings
@@ -71,8 +77,50 @@ jobs:
       - name: test (live-ble)
         run: cargo test -p netprov-server --features live-ble
 
+      - name: test (sdk ble-btleplug)
+        run: cargo test -p netprov-sdk --features ble-btleplug
+
       - name: build (live-ble)
         run: cargo build -p netprov-server --features live-ble
+
+  # The client and app are cross-platform; only netprovd is Linux-bound. This
+  # job is what keeps the btleplug/CoreBluetooth path buildable, so it builds
+  # per-crate rather than `--workspace` (netprov-server is not portable).
+  macos:
+    name: macos (btleplug)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-macos-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (sdk ble)
+        run: cargo clippy -p netprov-sdk --features ble --all-targets -- -D warnings
+
+      - name: clippy (client ble)
+        run: cargo clippy -p netprov-client --features ble --all-targets -- -D warnings
+
+      - name: clippy (app desktop)
+        run: cargo clippy -p netprov-app --features desktop --all-targets -- -D warnings
+
+      - name: test (sdk ble)
+        run: cargo test -p netprov-sdk --features ble
+
+      - name: build (client ble)
+        run: cargo build -p netprov-client --features ble
+
+      - name: build (app desktop)
+        run: cargo build -p netprov-app --features desktop
 
   deb:
     needs: test

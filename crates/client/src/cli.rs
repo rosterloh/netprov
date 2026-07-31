@@ -1,7 +1,41 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+
+/// Wi-Fi security type, mapped to a `WifiCredential` by the dispatcher.
+///
+/// A `ValueEnum` rather than a free string so clap rejects a typo like
+/// `wpa-2` at parse time and lists the valid values, and so WPA1 is
+/// reachable at all — it exists in the protocol and server but the old
+/// hand-rolled match never offered it (#22).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Security {
+    /// No passphrase.
+    Open,
+    /// WPA1 personal.
+    Wpa,
+    /// WPA2 personal.
+    Wpa2,
+    /// WPA3 personal (SAE).
+    Wpa3,
+}
+
+impl Security {
+    /// Whether this security type takes a passphrase.
+    pub fn needs_psk(self) -> bool {
+        !matches!(self, Security::Open)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Security::Open => "open",
+            Security::Wpa => "wpa",
+            Security::Wpa2 => "wpa2",
+            Security::Wpa3 => "wpa3",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "netprov", about = "netprov client CLI")]
@@ -57,11 +91,12 @@ pub enum Command {
     /// Connect to a Wi-Fi network.
     WifiConnect {
         ssid: String,
+        /// Passphrase. Omit and pipe it on stdin to keep it out of `ps` and
+        /// your shell history.
         #[arg(long)]
         psk: Option<String>,
-        /// Security type: open | wpa2 | wpa3
-        #[arg(long, default_value = "wpa2")]
-        security: String,
+        #[arg(long, value_enum, default_value_t = Security::Wpa2)]
+        security: Security,
     },
     /// Configure interface for DHCP.
     SetDhcp { iface: String },

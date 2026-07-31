@@ -4,6 +4,8 @@ use netprov_protocol::{
     WifiStatus,
 };
 use netprov_sdk::{BleClient, BleDevice, Netprov, PEER_ID_HINT, parse_peer_id};
+use std::net::Ipv4Addr;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -20,6 +22,33 @@ enum ScanState {
     Scanning,
     Complete,
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveTab {
+    Overview,
+    Wifi,
+    Interfaces,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WifiOperation {
+    Idle,
+    Scanning,
+    Connecting,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StaticIpv4Invalid {
+    address: bool,
+    gateway: bool,
+    dns: bool,
 }
 
 /// One row in the device picker.
@@ -48,6 +77,55 @@ struct InterfaceSnapshot {
 }
 
 type SharedClient = Arc<Mutex<Netprov<BleClient>>>;
+
+fn adjacent_tab(tab: ActiveTab, direction: TabDirection) -> ActiveTab {
+    match (tab, direction) {
+        (ActiveTab::Overview, TabDirection::Previous) => ActiveTab::Interfaces,
+        (ActiveTab::Overview, TabDirection::Next) => ActiveTab::Wifi,
+        (ActiveTab::Wifi, TabDirection::Previous) => ActiveTab::Overview,
+        (ActiveTab::Wifi, TabDirection::Next) => ActiveTab::Interfaces,
+        (ActiveTab::Interfaces, TabDirection::Previous) => ActiveTab::Wifi,
+        (ActiveTab::Interfaces, TabDirection::Next) => ActiveTab::Overview,
+    }
+}
+
+fn wifi_status_message(operation: WifiOperation, ssid: Option<&str>, count: usize) -> String {
+    match operation {
+        WifiOperation::Scanning => "Scanning for Wi-Fi networks…".into(),
+        WifiOperation::Connecting => format!("Connecting to {}…", ssid.unwrap_or("Wi-Fi")),
+        WifiOperation::Idle if count == 0 => "Scan to find nearby networks.".into(),
+        WifiOperation::Idle => format!("{count} networks found"),
+    }
+}
+
+fn static_ipv4_invalid_fields(address: &str, gateway: &str, dns: &str) -> StaticIpv4Invalid {
+    let address = address.trim();
+    let address_valid = address.split_once('/').is_some_and(|(address, prefix)| {
+        !prefix.contains('/')
+            && address.parse::<Ipv4Addr>().is_ok()
+            && prefix.parse::<u8>().is_ok_and(|prefix| prefix <= 32)
+    });
+    let gateway = gateway.trim();
+    let mut dns_addresses = dns
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let has_dns = dns_addresses.clone().next().is_some();
+
+    StaticIpv4Invalid {
+        address: !address_valid,
+        gateway: !gateway.is_empty() && gateway.parse::<Ipv4Addr>().is_err(),
+        dns: !has_dns || !dns_addresses.all(|value| value.parse::<Ipv4Addr>().is_ok()),
+    }
+}
+
+fn focus_mounted(element: Option<Rc<MountedData>>) {
+    if let Some(element) = element {
+        spawn(async move {
+            let _ = element.set_focus(true).await;
+        });
+    }
+}
 
 #[component]
 fn App() -> Element {
@@ -116,7 +194,7 @@ fn App() -> Element {
         });
     };
 
-    let disconnect = move |_| {
+    let mut disconnect = move |_| {
         if let Some(former_client) = client() {
             client.set(None);
             snapshot.set(None);
@@ -211,24 +289,12 @@ fn App() -> Element {
                     }
                 }
             } else if snapshot_view.is_some() {
-                section { id: "workspace-view",
-                    header { class: "device-header",
-                        div {
-                            p { class: "eyebrow", "Connected device" }
-                            h1 { "{connected_device_name}" }
-                            p { class: "mono muted", "{connected_device_detail}" }
-                        }
-                        div { class: "device-actions",
-                            span { class: "status success", "Secure connection" }
-                            button {
-                                class: "secondary",
-                                r#type: "button",
-                                onclick: disconnect,
-                                "Disconnect"
-                            }
-                        }
-                    }
-                    Dashboard { client, snapshot }
+                Dashboard {
+                    client,
+                    snapshot,
+                    device_name: connected_device_name,
+                    device_detail: connected_device_detail,
+                    ondisconnect: move |_| disconnect(()),
                 }
             }
         }
@@ -302,12 +368,15 @@ fn DeviceList(
 fn Dashboard(
     client: Signal<Option<SharedClient>>,
     mut snapshot: Signal<Option<DeviceSnapshot>>,
+    device_name: String,
+    device_detail: String,
+    ondisconnect: EventHandler<()>,
 ) -> Element {
-    let mut active_tab = use_signal(|| "overview");
+    let mut active_tab = use_signal(|| ActiveTab::Overview);
     let mut wifi_networks = use_signal(Vec::<WifiNetwork>::new);
     let mut selected_bssid = use_signal(|| None::<String>);
     let mut wifi_password = use_signal(String::new);
-    let mut wifi_busy = use_signal(|| false);
+    let mut wifi_operation = use_signal(|| WifiOperation::Idle);
     let mut wifi_error = use_signal(|| None::<String>);
     let mut success_message = use_signal(|| None::<String>);
     let mut selected_interface = use_signal(|| None::<String>);
@@ -317,8 +386,16 @@ fn Dashboard(
     let mut dns = use_signal(String::new);
     let mut ip_busy = use_signal(|| false);
     let mut ip_error = use_signal(|| None::<String>);
+    let mut ip_invalid = use_signal(StaticIpv4Invalid::default);
     let mut confirm_ip = use_signal(|| false);
+    let mut restore_ip_focus = use_signal(|| false);
     let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
+    let mut overview_tab_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut wifi_tab_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut interfaces_tab_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut apply_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut cancel_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut confirm_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
 
     let snapshot_view = snapshot().expect("dashboard requires a connected device");
     let active_tab_view = active_tab();
@@ -333,11 +410,16 @@ fn Dashboard(
     let gateway_view = gateway();
     let dns_view = dns();
     let ip_error_view = ip_error();
-    let wifi_is_busy = wifi_busy();
+    let ip_invalid_view = ip_invalid();
+    let confirm_ip_view = confirm_ip();
+    let wifi_operation_view = wifi_operation();
+    let wifi_is_busy = wifi_operation_view != WifiOperation::Idle;
+    let wifi_is_scanning = wifi_operation_view == WifiOperation::Scanning;
+    let wifi_is_connecting = wifi_operation_view == WifiOperation::Connecting;
     let ip_is_busy = ip_busy();
-    let overview_active = active_tab_view == "overview";
-    let wifi_active = active_tab_view == "wifi";
-    let interfaces_active = active_tab_view == "interfaces";
+    let overview_active = active_tab_view == ActiveTab::Overview;
+    let wifi_active = active_tab_view == ActiveTab::Wifi;
+    let interfaces_active = active_tab_view == ActiveTab::Interfaces;
     let interfaces_view = snapshot_view.interfaces.clone();
     let overview_interfaces = interfaces_view.clone();
     let current_ssid = snapshot_view.wifi_status.ssid.clone();
@@ -430,13 +512,42 @@ fn Dashboard(
         .iter()
         .filter(|snapshot| !snapshot.config.addresses.is_empty())
         .count();
-    let ip_fields_invalid = !dhcp_mode_view && ip_error_view.is_some();
+    let wifi_status_text = wifi_status_message(
+        wifi_operation_view,
+        selected_network_view
+            .as_ref()
+            .map(|network| network.ssid.as_str()),
+        wifi_networks_view.len(),
+    );
+
+    use_effect(move || {
+        if restore_ip_focus() && !confirm_ip() && !ip_busy() {
+            restore_ip_focus.set(false);
+            focus_mounted(apply_ip_button_element.cloned());
+        }
+    });
+
+    let navigate_tabs = move |event: KeyboardEvent| {
+        let direction = match event.key() {
+            Key::ArrowLeft => TabDirection::Previous,
+            Key::ArrowRight => TabDirection::Next,
+            _ => return,
+        };
+        event.prevent_default();
+        let next = adjacent_tab(active_tab(), direction);
+        active_tab.set(next);
+        focus_mounted(match next {
+            ActiveTab::Overview => overview_tab_element.cloned(),
+            ActiveTab::Wifi => wifi_tab_element.cloned(),
+            ActiveTab::Interfaces => interfaces_tab_element.cloned(),
+        });
+    };
 
     let scan = move |_| {
         let Some(client) = client() else {
             return;
         };
-        wifi_busy.set(true);
+        wifi_operation.set(WifiOperation::Scanning);
         wifi_error.set(None);
         success_message.set(None);
         spawn(async move {
@@ -448,7 +559,7 @@ fn Dashboard(
                 }
                 Err(err) => wifi_error.set(Some(err)),
             }
-            wifi_busy.set(false);
+            wifi_operation.set(WifiOperation::Idle);
         });
     };
 
@@ -472,7 +583,7 @@ fn Dashboard(
         };
         let ssid = network.ssid.clone();
         let password = wifi_password();
-        wifi_busy.set(true);
+        wifi_operation.set(WifiOperation::Connecting);
         wifi_error.set(None);
         success_message.set(None);
         spawn(async move {
@@ -488,12 +599,18 @@ fn Dashboard(
                 }
                 Err(err) => wifi_error.set(Some(err)),
             }
-            wifi_busy.set(false);
+            wifi_operation.set(WifiOperation::Idle);
         });
     };
 
     let request_ip_change = move |event: FormEvent| {
         event.prevent_default();
+        let invalid = if dhcp_mode() {
+            StaticIpv4Invalid::default()
+        } else {
+            static_ipv4_invalid_fields(&address(), &gateway(), &dns())
+        };
+        ip_invalid.set(invalid);
         match prepare_ip_change(
             selected_interface(),
             dhcp_mode(),
@@ -511,6 +628,12 @@ fn Dashboard(
                 ip_error.set(Some(err));
             }
         }
+    };
+
+    let mut close_ip_confirmation = move || {
+        confirm_ip.set(false);
+        pending_ip_change.set(None);
+        restore_ip_focus.set(true);
     };
 
     let apply_ip = move |_| {
@@ -538,10 +661,30 @@ fn Dashboard(
                 Err(err) => ip_error.set(Some(err)),
             }
             ip_busy.set(false);
+            restore_ip_focus.set(true);
         });
     };
 
     rsx! {
+        section { id: "workspace-view",
+        div { inert: confirm_ip_view,
+        header { class: "device-header",
+            div {
+                p { class: "eyebrow", "Connected device" }
+                h1 { "{device_name}" }
+                p { class: "mono muted", "{device_detail}" }
+            }
+            div { class: "device-actions",
+                span { class: "status success", "Secure connection" }
+                button {
+                    class: "secondary",
+                    r#type: "button",
+                    onclick: move |_| ondisconnect.call(()),
+                    "Disconnect"
+                }
+            }
+        }
+
         nav {
             class: "tabs",
             role: "tablist",
@@ -552,7 +695,10 @@ fn Dashboard(
                 role: "tab",
                 aria_controls: "overview-panel",
                 aria_selected: overview_active,
-                onclick: move |_| active_tab.set("overview"),
+                "tabindex": if overview_active { "0" } else { "-1" },
+                onmounted: move |event| overview_tab_element.set(Some(event.data())),
+                onkeydown: navigate_tabs,
+                onclick: move |_| active_tab.set(ActiveTab::Overview),
                 "Overview"
             }
             button {
@@ -561,7 +707,10 @@ fn Dashboard(
                 role: "tab",
                 aria_controls: "wifi-panel",
                 aria_selected: wifi_active,
-                onclick: move |_| active_tab.set("wifi"),
+                "tabindex": if wifi_active { "0" } else { "-1" },
+                onmounted: move |event| wifi_tab_element.set(Some(event.data())),
+                onkeydown: navigate_tabs,
+                onclick: move |_| active_tab.set(ActiveTab::Wifi),
                 "Wi-Fi"
             }
             button {
@@ -570,7 +719,10 @@ fn Dashboard(
                 role: "tab",
                 aria_controls: "interfaces-panel",
                 aria_selected: interfaces_active,
-                onclick: move |_| active_tab.set("interfaces"),
+                "tabindex": if interfaces_active { "0" } else { "-1" },
+                onmounted: move |event| interfaces_tab_element.set(Some(event.data())),
+                onkeydown: navigate_tabs,
+                onclick: move |_| active_tab.set(ActiveTab::Interfaces),
                 "Interfaces"
             }
         }
@@ -688,7 +840,10 @@ fn Dashboard(
                     button {
                         class: "primary",
                         r#type: "button",
-                        onclick: move |_| active_tab.set("wifi"),
+                        onclick: move |_| {
+                            active_tab.set(ActiveTab::Wifi);
+                            focus_mounted(wifi_tab_element.cloned());
+                        },
                         "Continue setup"
                     }
                 }
@@ -712,17 +867,11 @@ fn Dashboard(
                             r#type: "button",
                             disabled: wifi_is_busy,
                             onclick: scan,
-                            if wifi_is_busy { "Scanning…" } else { "Scan" }
+                            if wifi_is_scanning { "Scanning…" } else { "Scan" }
                         }
                     }
                     p { class: "muted", role: "status",
-                        if wifi_is_busy {
-                            "Scanning for Wi-Fi networks…"
-                        } else if wifi_networks_view.is_empty() {
-                            "Scan to find nearby networks."
-                        } else {
-                            "{wifi_networks_view.len()} networks found"
-                        }
+                        "{wifi_status_text}"
                     }
                     div {
                         class: "network-list",
@@ -811,7 +960,11 @@ fn Dashboard(
                                 class: "primary",
                                 r#type: "submit",
                                 disabled: wifi_is_busy || selected_bssid_view.is_none(),
-                                if wifi_is_busy { "Connecting…" } else { "Connect" }
+                                if wifi_is_connecting {
+                                    "Connecting to {wifi_form_title}…"
+                                } else {
+                                    "Connect"
+                                }
                             }
                         }
                     }
@@ -887,6 +1040,7 @@ fn Dashboard(
                                                     .join(", ")
                                             );
                                             ip_error.set(None);
+                                            ip_invalid.set(StaticIpv4Invalid::default());
                                         },
                                         span {
                                             strong { "{iface.name}" }
@@ -940,7 +1094,7 @@ fn Dashboard(
                                         class: "mono",
                                         inputmode: "decimal",
                                         value: "{address_view}",
-                                        aria_invalid: ip_fields_invalid,
+                                        aria_invalid: ip_invalid_view.address,
                                         disabled: ip_is_busy,
                                         oninput: move |event| address.set(event.value()),
                                     }
@@ -951,7 +1105,7 @@ fn Dashboard(
                                         class: "mono",
                                         inputmode: "decimal",
                                         value: "{gateway_view}",
-                                        aria_invalid: ip_fields_invalid,
+                                        aria_invalid: ip_invalid_view.gateway,
                                         disabled: ip_is_busy,
                                         oninput: move |event| gateway.set(event.value()),
                                     }
@@ -963,7 +1117,7 @@ fn Dashboard(
                                         inputmode: "decimal",
                                         value: "{dns_view}",
                                         aria_describedby: "dns-hint",
-                                        aria_invalid: ip_fields_invalid,
+                                        aria_invalid: ip_invalid_view.dns,
                                         disabled: ip_is_busy,
                                         oninput: move |event| dns.set(event.value()),
                                     }
@@ -987,6 +1141,9 @@ fn Dashboard(
                                 class: "primary",
                                 r#type: "submit",
                                 disabled: selected_interface_view.is_none() || ip_is_busy,
+                                onmounted: move |event| {
+                                    apply_ip_button_element.set(Some(event.data()))
+                                },
                                 if ip_is_busy {
                                     "Applying…"
                                 } else {
@@ -998,13 +1155,21 @@ fn Dashboard(
                 }
             }
         }
+        }
 
-        if confirm_ip() {
+        if confirm_ip_view {
             div { class: "dialog-overlay",
                 dialog {
                     id: "ip-confirm-dialog",
                     open: true,
                     aria_labelledby: "ip-confirm-title",
+                    aria_modal: "true",
+                    onkeydown: move |event: KeyboardEvent| {
+                        if event.key() == Key::Escape {
+                            event.prevent_default();
+                            close_ip_confirmation();
+                        }
+                    },
                     div { class: "dialog-body",
                         p { class: "eyebrow", "Confirm change" }
                         h2 { id: "ip-confirm-title", "Apply network changes?" }
@@ -1018,16 +1183,31 @@ fn Dashboard(
                                 r#type: "button",
                                 autofocus: true,
                                 disabled: ip_is_busy,
-                                onclick: move |_| {
-                                    confirm_ip.set(false);
-                                    pending_ip_change.set(None);
+                                onmounted: move |event| {
+                                    cancel_ip_button_element.set(Some(event.data()))
                                 },
+                                onkeydown: move |event: KeyboardEvent| {
+                                    if event.key() == Key::Tab {
+                                        event.prevent_default();
+                                        focus_mounted(confirm_ip_button_element.cloned());
+                                    }
+                                },
+                                onclick: move |_| close_ip_confirmation(),
                                 "Cancel"
                             }
                             button {
                                 class: "primary",
                                 r#type: "button",
                                 disabled: ip_is_busy,
+                                onmounted: move |event| {
+                                    confirm_ip_button_element.set(Some(event.data()))
+                                },
+                                onkeydown: move |event: KeyboardEvent| {
+                                    if event.key() == Key::Tab {
+                                        event.prevent_default();
+                                        focus_mounted(cancel_ip_button_element.cloned());
+                                    }
+                                },
                                 onclick: apply_ip,
                                 "Apply changes"
                             }
@@ -1044,6 +1224,7 @@ fn Dashboard(
                 aria_live: "polite",
                 "{message}"
             }
+        }
         }
     }
 }
@@ -1402,5 +1583,43 @@ mod tests {
 
         assert_eq!(iface, "wlan0");
         assert_eq!(config.unwrap().address.to_string(), "192.168.2.10/24");
+    }
+
+    #[test]
+    fn tab_navigation_wraps_in_both_directions() {
+        assert_eq!(
+            adjacent_tab(ActiveTab::Overview, TabDirection::Previous),
+            ActiveTab::Interfaces
+        );
+        assert_eq!(
+            adjacent_tab(ActiveTab::Interfaces, TabDirection::Next),
+            ActiveTab::Overview
+        );
+    }
+
+    #[test]
+    fn wifi_operation_status_names_the_active_operation() {
+        assert_eq!(
+            wifi_status_message(WifiOperation::Scanning, None, 0),
+            "Scanning for Wi-Fi networks…"
+        );
+        assert_eq!(
+            wifi_status_message(WifiOperation::Connecting, Some("Workshop"), 3),
+            "Connecting to Workshop…"
+        );
+    }
+
+    #[test]
+    fn static_ipv4_invalid_state_is_field_specific() {
+        let invalid = static_ipv4_invalid_fields("not-an-address", "192.168.1.1", "1.1.1.1");
+        assert!(invalid.address);
+        assert!(!invalid.gateway);
+        assert!(!invalid.dns);
+
+        let invalid =
+            static_ipv4_invalid_fields("192.168.1.20/24", "not-a-gateway", "not-a-dns-address");
+        assert!(!invalid.address);
+        assert!(invalid.gateway);
+        assert!(invalid.dns);
     }
 }

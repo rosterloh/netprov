@@ -9,8 +9,8 @@ use crate::rate_limit::RateLimiter;
 use crate::session::{Session, dispatch};
 use netprov_protocol::{
     AUTH_PAYLOAD_LEN, BoundedString, InfoPayload, MAX_FRAME_LEN, MAX_MESSAGE_SIZE,
-    PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, decode_request,
-    encode_response, fragment, parse_frame,
+    PROTOCOL_VERSION, PSK_LEN, ProtocolError, Reassembler, Request, Response, SUPPORTED_OPS_ALL,
+    decode_request, encode_response, fragment, parse_frame,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -94,7 +94,7 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
     pub fn on_info(&self) -> Vec<u8> {
         let payload = InfoPayload {
             protocol_version: PROTOCOL_VERSION,
-            supported_ops: 0x7F, // bits 0..=6 → all 7 v1 ops
+            supported_ops: SUPPORTED_OPS_ALL,
             model: self.model.clone(),
         };
         let mut bytes = Vec::with_capacity(64);

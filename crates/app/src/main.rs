@@ -67,11 +67,22 @@ fn App() -> Element {
     let scan_state_view = scan_state();
     let client_view = client();
     let snapshot_view = snapshot();
-    let selected_peer = selected_device().map(|device| device.id);
+    let selected_device_view = selected_device();
+    let selected_peer = selected_device_view
+        .as_ref()
+        .map(|device| device.id.clone());
     let connection_error_view = connection_error();
     let is_busy = is_connecting();
     let is_scanning = matches!(scan_state_view, ScanState::Scanning);
     let can_connect = !is_busy && !current_peer.trim().is_empty();
+    let connected_device_name = selected_device_view
+        .as_ref()
+        .map(|device| device.label.clone())
+        .unwrap_or_else(|| "Netprov device".to_string());
+    let connected_device_detail = selected_device_view
+        .as_ref()
+        .map(|device| format!("{} · {}", device.detail, device.id))
+        .unwrap_or_else(|| current_peer.clone());
 
     let scan = move |_| {
         scan_state.set(ScanState::Scanning);
@@ -116,56 +127,39 @@ fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
-        main { class: "app-shell",
-            section { class: "topbar",
-                div {
-                    h1 { "netprov" }
-                    p { "BLE network provisioning" }
-                }
-                if client_view.is_some() {
-                    button { onclick: disconnect, "Disconnect" }
-                }
-            }
-
+        document::Title { "Netprov desktop app" }
+        header { class: "app-header",
+            a { class: "brand", href: "#app", aria_label: "Netprov home", "netprov" }
+            span { class: "header-rule", aria_hidden: "true" }
+            p { "Secure network setup over Bluetooth" }
+        }
+        main { id: "app",
             if client_view.is_none() {
-                section { class: "connection-panel",
-                    label {
-                        span { "Peer" }
-                        input {
-                            value: "{current_peer}",
-                            placeholder: "{PEER_ID_HINT}",
-                            oninput: move |event| {
-                                peer.set(event.value());
-                                selected_device.set(None);
-                            },
+                section {
+                    id: "discovery-view",
+                    class: "discovery-card",
+                    aria_labelledby: "discovery-title",
+                    div { class: "section-heading",
+                        div {
+                            p { class: "eyebrow", "Device setup" }
+                            h1 { id: "discovery-title", "Find a device" }
+                            p { class: "muted", "Choose the nearby device you want to provision." }
                         }
-                    }
-                    label {
-                        span { "PSK path" }
-                        input {
-                            value: "{current_key_path}",
-                            oninput: move |event| key_path.set(event.value()),
-                        }
-                    }
-                    div { class: "connection-actions",
                         button {
+                            class: "secondary",
+                            r#type: "button",
                             disabled: is_busy || is_scanning,
                             onclick: scan,
-                            "Scan"
-                        }
-                        button {
-                            disabled: !can_connect,
-                            onclick: connect,
-                            "Connect"
+                            "Scan again"
                         }
                     }
-                }
 
-                section { class: "device-panel",
-                    div { class: "panel-heading",
-                        h2 { "Devices" }
+                    div {
+                        class: if is_scanning { "scan-line scanning" } else { "scan-line" },
+                        span { class: "scan-dot", aria_hidden: "true" }
                         ScanStatus { state: scan_state_view.clone(), count: devices_view.len() }
                     }
+
                     DeviceList {
                         devices: devices_view,
                         selected_peer,
@@ -175,15 +169,68 @@ fn App() -> Element {
                             selected_device.set(Some(device));
                         },
                     }
-                }
 
-                if let Some(message) = connection_error_view {
-                    div { class: "error-row", "{message}" }
+                    details {
+                        summary { "Advanced connection" }
+                        div { class: "advanced-grid",
+                            label {
+                                span { "Peer identifier" }
+                                input {
+                                    class: "mono",
+                                    autocomplete: "off",
+                                    value: "{current_peer}",
+                                    placeholder: "{PEER_ID_HINT}",
+                                    oninput: move |event| {
+                                        peer.set(event.value());
+                                        selected_device.set(None);
+                                    },
+                                }
+                            }
+                            label {
+                                span { "PSK path" }
+                                input {
+                                    class: "mono",
+                                    value: "{current_key_path}",
+                                    oninput: move |event| key_path.set(event.value()),
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(message) = connection_error_view {
+                        div { class: "message error", role: "alert", "{message}" }
+                    }
+                    div { class: "connect-row",
+                        button {
+                            class: "primary",
+                            r#type: "button",
+                            disabled: !can_connect,
+                            onclick: connect,
+                            if is_busy { "Connecting securely…" } else { "Connect to device" }
+                        }
+                    }
                 }
             } else if snapshot_view.is_some() {
-                Dashboard { client, snapshot }
+                section { id: "workspace-view",
+                    header { class: "device-header",
+                        div {
+                            p { class: "eyebrow", "Connected device" }
+                            h1 { "{connected_device_name}" }
+                            p { class: "mono muted", "{connected_device_detail}" }
+                        }
+                        div { class: "device-actions",
+                            span { class: "status success", "Secure connection" }
+                            button {
+                                class: "secondary",
+                                r#type: "button",
+                                onclick: disconnect,
+                                "Disconnect"
+                            }
+                        }
+                    }
+                    Dashboard { client, snapshot }
+                }
             }
-
         }
     }
 }
@@ -192,16 +239,16 @@ fn App() -> Element {
 fn ScanStatus(state: ScanState, count: usize) -> Element {
     match state {
         ScanState::Idle => rsx! {
-            span { class: "scan-status", "Not scanned" }
+            span { role: "status", "Ready to scan for nearby Netprov devices." }
         },
         ScanState::Scanning => rsx! {
-            span { class: "scan-status", "Scanning..." }
+            span { role: "status", "Scanning for nearby Netprov devices…" }
         },
         ScanState::Complete => rsx! {
-            span { class: "scan-status", "{count} found" }
+            span { role: "status", "{count} devices found" }
         },
         ScanState::Failed(ref message) => rsx! {
-            span { class: "scan-status failed", "{message}" }
+            span { role: "status", "Scan failed: {message}" }
         },
     }
 }
@@ -213,14 +260,11 @@ fn DeviceList(
     disabled: bool,
     onselect: EventHandler<DeviceSummary>,
 ) -> Element {
-    if devices.is_empty() {
-        return rsx! {
-            p { class: "muted", "Scan to discover nearby netprov BLE devices." }
-        };
-    }
-
     rsx! {
-        div { class: "device-list",
+        div { class: "device-list", aria_label: "Nearby devices",
+            if devices.is_empty() {
+                p { class: "muted", "Scan to discover nearby Netprov devices." }
+            }
             for device in devices {
                 {
                     let selected = selected_peer.as_deref() == Some(&device.id);
@@ -237,13 +281,15 @@ fn DeviceList(
                     rsx! {
                         button {
                             class: row_class,
+                            r#type: "button",
+                            aria_pressed: selected,
                             disabled,
                             onclick: move |_| onselect.call(selected_device.clone()),
-                            div {
+                            span {
                                 strong { "{device.label}" }
-                                span { "{device.detail}" }
+                                small { "{device.detail}" }
                             }
-                            span { class: "device-signal", "{signal}" }
+                            span { class: "mono", "{signal}" }
                         }
                     }
                 }
@@ -257,6 +303,7 @@ fn Dashboard(
     client: Signal<Option<SharedClient>>,
     mut snapshot: Signal<Option<DeviceSnapshot>>,
 ) -> Element {
+    let mut active_tab = use_signal(|| "overview");
     let mut wifi_networks = use_signal(Vec::<WifiNetwork>::new);
     let mut selected_bssid = use_signal(|| None::<String>);
     let mut wifi_password = use_signal(String::new);
@@ -274,6 +321,7 @@ fn Dashboard(
     let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
 
     let snapshot_view = snapshot().expect("dashboard requires a connected device");
+    let active_tab_view = active_tab();
     let wifi_networks_view = wifi_networks();
     let selected_bssid_view = selected_bssid();
     let wifi_password_view = wifi_password();
@@ -287,6 +335,102 @@ fn Dashboard(
     let ip_error_view = ip_error();
     let wifi_is_busy = wifi_busy();
     let ip_is_busy = ip_busy();
+    let overview_active = active_tab_view == "overview";
+    let wifi_active = active_tab_view == "wifi";
+    let interfaces_active = active_tab_view == "interfaces";
+    let interfaces_view = snapshot_view.interfaces.clone();
+    let overview_interfaces = interfaces_view.clone();
+    let current_ssid = snapshot_view.wifi_status.ssid.clone();
+    let wifi_ssid = current_ssid
+        .clone()
+        .unwrap_or_else(|| "Not connected".into());
+    let wifi_signal = snapshot_view
+        .wifi_status
+        .signal
+        .map(|signal| format!("{signal}%"))
+        .unwrap_or_else(|| "Signal unavailable".into());
+    let wifi_security = snapshot_view
+        .wifi_status
+        .security
+        .as_ref()
+        .map(|security| format!("{security:?}"))
+        .unwrap_or_else(|| "Security unavailable".into());
+    let selected_network_view = selected_bssid_view
+        .as_deref()
+        .and_then(|bssid| {
+            wifi_networks_view
+                .iter()
+                .find(|network| network.bssid == bssid)
+        })
+        .cloned();
+    let wifi_form_title = selected_network_view
+        .as_ref()
+        .map(|network| network.ssid.clone())
+        .unwrap_or_else(|| "Select a network".into());
+    let wifi_form_copy = selected_network_view
+        .as_ref()
+        .map(|network| {
+            let security = network
+                .security
+                .as_ref()
+                .map(|security| format!("{security:?}"))
+                .unwrap_or_else(|| "Unknown security".into());
+            let signal = network
+                .signal
+                .map(|signal| format!("{signal}%"))
+                .unwrap_or_else(|| "unknown".into());
+            format!("{security} network · {signal} signal")
+        })
+        .unwrap_or_else(|| "Choose a network to enter its credentials.".into());
+    let needs_wifi_password = selected_network_view
+        .as_ref()
+        .is_some_and(|network| !matches!(network.security.as_ref(), Some(&Security::Open)));
+    let wifi_password_invalid = wifi_error_view
+        .as_deref()
+        .is_some_and(|error| error.contains("password"));
+    let selected_interface_snapshot = selected_interface_view
+        .as_deref()
+        .and_then(|name| {
+            interfaces_view
+                .iter()
+                .find(|snapshot| snapshot.interface.name == name)
+        })
+        .cloned();
+    let selected_interface_title = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.interface.name.clone())
+        .unwrap_or_else(|| "Select an interface".into());
+    let selected_interface_detail = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            format!(
+                "{:?} · {}",
+                snapshot.interface.iface_type,
+                snapshot
+                    .interface
+                    .mac
+                    .as_deref()
+                    .unwrap_or("MAC unavailable")
+            )
+        })
+        .unwrap_or_else(|| "Choose an interface to edit its IPv4 configuration.".into());
+    let selected_interface_summary = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            let address = snapshot
+                .config
+                .addresses
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "No address".into());
+            format!("{} · {address}", ipv4_method_label(&snapshot.config.method))
+        })
+        .unwrap_or_else(|| format!("{} interfaces available", interfaces_view.len()));
+    let configured_interfaces = overview_interfaces
+        .iter()
+        .filter(|snapshot| !snapshot.config.addresses.is_empty())
+        .count();
+    let ip_fields_invalid = !dhcp_mode_view && ip_error_view.is_some();
 
     let scan = move |_| {
         let Some(client) = client() else {
@@ -308,7 +452,8 @@ fn Dashboard(
         });
     };
 
-    let connect_wifi = move |_| {
+    let connect_wifi = move |event: FormEvent| {
+        event.prevent_default();
         let Some(client) = client() else {
             return;
         };
@@ -347,21 +492,24 @@ fn Dashboard(
         });
     };
 
-    let request_ip_change = move |_| match prepare_ip_change(
-        selected_interface(),
-        dhcp_mode(),
-        &address(),
-        &gateway(),
-        &dns(),
-    ) {
-        Ok(change) => {
-            pending_ip_change.set(Some(change));
-            ip_error.set(None);
-            confirm_ip.set(true);
-        }
-        Err(err) => {
-            confirm_ip.set(false);
-            ip_error.set(Some(err));
+    let request_ip_change = move |event: FormEvent| {
+        event.prevent_default();
+        match prepare_ip_change(
+            selected_interface(),
+            dhcp_mode(),
+            &address(),
+            &gateway(),
+            &dns(),
+        ) {
+            Ok(change) => {
+                pending_ip_change.set(Some(change));
+                ip_error.set(None);
+                confirm_ip.set(true);
+            }
+            Err(err) => {
+                confirm_ip.set(false);
+                ip_error.set(Some(err));
+            }
         }
     };
 
@@ -394,249 +542,516 @@ fn Dashboard(
     };
 
     rsx! {
-        section { class: "dashboard",
-            if let Some(message) = success_message_view {
-                div { class: "status ready", "{message}" }
+        nav {
+            class: "tabs",
+            role: "tablist",
+            aria_label: "Device configuration",
+            button {
+                id: "overview-tab",
+                r#type: "button",
+                role: "tab",
+                aria_controls: "overview-panel",
+                aria_selected: overview_active,
+                onclick: move |_| active_tab.set("overview"),
+                "Overview"
             }
-            div { class: "panel",
-                h2 { "Interfaces" }
-                div { class: "interface-list",
-                    for interface_snapshot in snapshot_view.interfaces {
+            button {
+                id: "wifi-tab",
+                r#type: "button",
+                role: "tab",
+                aria_controls: "wifi-panel",
+                aria_selected: wifi_active,
+                onclick: move |_| active_tab.set("wifi"),
+                "Wi-Fi"
+            }
+            button {
+                id: "interfaces-tab",
+                r#type: "button",
+                role: "tab",
+                aria_controls: "interfaces-panel",
+                aria_selected: interfaces_active,
+                onclick: move |_| active_tab.set("interfaces"),
+                "Interfaces"
+            }
+        }
+
+        section {
+            id: "overview-panel",
+            role: "tabpanel",
+            aria_labelledby: "overview-tab",
+            hidden: !overview_active,
+            div { class: "workspace-grid",
+                div { class: "panel",
+                    p { class: "eyebrow", "Current state" }
+                    h2 { "Network overview" }
+                    div { class: "summary-row",
+                        div {
+                            h3 { "Wi-Fi" }
+                            p { class: "muted", "Active wireless connection" }
+                        }
+                        div { class: "summary-value",
+                            strong { "{wifi_ssid}" }
+                            small { "{wifi_security} · {wifi_signal}" }
+                        }
+                    }
+                    for interface_snapshot in overview_interfaces {
                         {
-                            let selected = selected_interface_view.as_deref()
-                                == Some(interface_snapshot.interface.name.as_str());
-                            let row_class = if selected {
-                                "device-row selected"
-                            } else {
-                                "device-row"
-                            };
-                            let iface = interface_snapshot.interface.clone();
-                            let mac = iface.mac.clone().unwrap_or_else(|| "-".to_string());
+                            let mac = interface_snapshot
+                                .interface
+                                .mac
+                                .as_deref()
+                                .unwrap_or("MAC unavailable");
                             let address_text = interface_snapshot
                                 .config
                                 .addresses
-                                .first()
+                                .iter()
                                 .map(ToString::to_string)
-                                .unwrap_or_else(|| "-".to_string());
-                            let selected_snapshot = interface_snapshot.clone();
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let address_text = if address_text.is_empty() {
+                                "No IPv4 address".to_string()
+                            } else {
+                                address_text
+                            };
+                            let method = ipv4_method_label(&interface_snapshot.config.method);
                             rsx! {
-                                button {
-                                    key: "{iface.name}",
-                                    class: row_class,
-                                    disabled: ip_is_busy,
-                                    onclick: move |_| {
-                                        let config = &selected_snapshot.config;
-                                        selected_interface.set(Some(
-                                            selected_snapshot.interface.name.clone()
-                                        ));
-                                        dhcp_mode.set(matches!(config.method, Ipv4Method::Auto));
-                                        address.set(config.addresses.first()
-                                            .map(ToString::to_string)
-                                            .unwrap_or_default());
-                                        gateway.set(config.gateway
-                                            .map(|value| value.to_string())
-                                            .unwrap_or_default());
-                                        dns.set(config.dns.iter()
-                                            .map(ToString::to_string)
-                                            .collect::<Vec<_>>()
-                                            .join(", "));
-                                        ip_error.set(None);
-                                    },
+                                div { class: "summary-row",
                                     div {
-                                        strong { "{iface.name}" }
-                                        span { "{mac}" }
+                                        h3 { "{interface_snapshot.interface.name}" }
+                                        p { class: "muted mono", "{mac}" }
                                     }
-                                    div { class: "interface-meta",
-                                        span { "{iface.iface_type:?}" }
-                                        span { "{iface.state:?}" }
-                                        span { "{interface_snapshot.config.method:?}" }
-                                        span { "{address_text}" }
+                                    div { class: "summary-value mono",
+                                        strong { "{address_text}" }
+                                        small {
+                                            "{method} · {interface_snapshot.interface.state:?}"
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                if let Some(iface) = selected_interface_view {
-                    div { class: "metric-grid",
-                        strong { "Configure {iface}" }
-                        label {
-                            input {
-                                r#type: "radio",
-                                name: "ipv4-mode",
-                                checked: dhcp_mode_view,
-                                disabled: ip_is_busy,
-                                onchange: move |_| dhcp_mode.set(true),
+                aside { class: "panel",
+                    p { class: "eyebrow", "Setup progress" }
+                    h2 { "Ready to configure" }
+                    ul { class: "checklist",
+                        li {
+                            span { class: "checkmark", aria_hidden: "true", "✓" }
+                            span {
+                                strong { "Securely connected" }
+                                small {
+                                    class: "muted",
+                                    "Authenticated with the device PSK"
+                                }
                             }
-                            "DHCP"
                         }
-                        label {
-                            input {
-                                r#type: "radio",
-                                name: "ipv4-mode",
-                                checked: !dhcp_mode_view,
-                                disabled: ip_is_busy,
-                                onchange: move |_| dhcp_mode.set(false),
+                        li {
+                            span {
+                                class: if current_ssid.is_some() {
+                                    "checkmark"
+                                } else {
+                                    "checkmark pending"
+                                },
+                                aria_hidden: "true",
+                                if current_ssid.is_some() { "✓" } else { "–" }
                             }
-                            "Static"
+                            span {
+                                strong {
+                                    if current_ssid.is_some() {
+                                        "Wi-Fi detected"
+                                    } else {
+                                        "Wi-Fi not connected"
+                                    }
+                                }
+                                small { class: "muted", "{wifi_ssid}" }
+                            }
+                        }
+                        li {
+                            span {
+                                class: if configured_interfaces > 0 {
+                                    "checkmark"
+                                } else {
+                                    "checkmark pending"
+                                },
+                                aria_hidden: "true",
+                                if configured_interfaces > 0 { "✓" } else { "–" }
+                            }
+                            span {
+                                strong { "IPv4 configuration" }
+                                small {
+                                    class: "muted",
+                                    "{configured_interfaces} interfaces have an address"
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        class: "primary",
+                        r#type: "button",
+                        onclick: move |_| active_tab.set("wifi"),
+                        "Continue setup"
+                    }
+                }
+            }
+        }
+
+        section {
+            id: "wifi-panel",
+            role: "tabpanel",
+            aria_labelledby: "wifi-tab",
+            hidden: !wifi_active,
+            div { class: "network-layout",
+                div { class: "panel",
+                    div { class: "panel-heading",
+                        div {
+                            p { class: "eyebrow", "Nearby networks" }
+                            h2 { "Choose Wi-Fi" }
+                        }
+                        button {
+                            class: "secondary",
+                            r#type: "button",
+                            disabled: wifi_is_busy,
+                            onclick: scan,
+                            if wifi_is_busy { "Scanning…" } else { "Scan" }
+                        }
+                    }
+                    p { class: "muted", role: "status",
+                        if wifi_is_busy {
+                            "Scanning for Wi-Fi networks…"
+                        } else if wifi_networks_view.is_empty() {
+                            "Scan to find nearby networks."
+                        } else {
+                            "{wifi_networks_view.len()} networks found"
+                        }
+                    }
+                    div {
+                        class: "network-list",
+                        aria_label: "Nearby Wi-Fi networks",
+                        for network in wifi_networks_view {
+                            {
+                                let selected = selected_bssid_view.as_deref()
+                                    == Some(network.bssid.as_str());
+                                let current = current_ssid.as_deref()
+                                    == Some(network.ssid.as_str());
+                                let row_class = if selected {
+                                    "network-row selected"
+                                } else {
+                                    "network-row"
+                                };
+                                let signal = network
+                                    .signal
+                                    .map(|signal| format!("{signal}%"))
+                                    .unwrap_or_else(|| "-".to_string());
+                                let security = network
+                                    .security
+                                    .as_ref()
+                                    .map(|security| format!("{security:?}"))
+                                    .unwrap_or_else(|| "Unknown".to_string());
+                                let selected_network = network.clone();
+                                rsx! {
+                                    button {
+                                        key: "{network.bssid}",
+                                        class: row_class,
+                                        r#type: "button",
+                                        aria_pressed: selected,
+                                        disabled: wifi_is_busy,
+                                        onclick: move |_| {
+                                            selected_bssid.set(Some(
+                                                selected_network.bssid.clone()
+                                            ));
+                                            wifi_error.set(None);
+                                        },
+                                        span {
+                                            strong { "{network.ssid}" }
+                                            small {
+                                                "{security}"
+                                                if current {
+                                                    span {
+                                                        class: "current-tag",
+                                                        " · Connected"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        span { class: "mono signal", "{signal}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                form { class: "panel", onsubmit: connect_wifi,
+                    p { class: "eyebrow", "Connection" }
+                    h2 { "{wifi_form_title}" }
+                    p { class: "muted", "{wifi_form_copy}" }
+                    div { class: "form-stack",
+                        if needs_wifi_password {
+                            label {
+                                span { "Wi-Fi password" }
+                                input {
+                                    r#type: "password",
+                                    autocomplete: "new-password",
+                                    minlength: 8,
+                                    value: "{wifi_password_view}",
+                                    aria_invalid: wifi_password_invalid,
+                                    disabled: wifi_is_busy,
+                                    oninput: move |event| wifi_password.set(event.value()),
+                                }
+                            }
+                        }
+                        if let Some(message) = wifi_error_view {
+                            div {
+                                class: "message error",
+                                role: "alert",
+                                "{message}"
+                            }
+                        }
+                        div { class: "form-actions",
+                            button {
+                                class: "primary",
+                                r#type: "submit",
+                                disabled: wifi_is_busy || selected_bssid_view.is_none(),
+                                if wifi_is_busy { "Connecting…" } else { "Connect" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        section {
+            id: "interfaces-panel",
+            role: "tabpanel",
+            aria_labelledby: "interfaces-tab",
+            hidden: !interfaces_active,
+            div { class: "interface-layout",
+                div { class: "panel",
+                    p { class: "eyebrow", "Network hardware" }
+                    h2 { "Interfaces" }
+                    p { class: "muted mono", "{selected_interface_summary}" }
+                    div {
+                        class: "interface-list",
+                        aria_label: "Network interfaces",
+                        for interface_snapshot in interfaces_view {
+                            {
+                                let selected = selected_interface_view.as_deref()
+                                    == Some(interface_snapshot.interface.name.as_str());
+                                let row_class = if selected {
+                                    "interface-row selected"
+                                } else {
+                                    "interface-row"
+                                };
+                                let iface = interface_snapshot.interface.clone();
+                                let address_text = interface_snapshot
+                                    .config
+                                    .addresses
+                                    .first()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| "No address".into());
+                                let selected_snapshot = interface_snapshot.clone();
+                                rsx! {
+                                    button {
+                                        key: "{iface.name}",
+                                        class: row_class,
+                                        r#type: "button",
+                                        aria_pressed: selected,
+                                        disabled: ip_is_busy,
+                                        onclick: move |_| {
+                                            let config = &selected_snapshot.config;
+                                            selected_interface.set(Some(
+                                                selected_snapshot.interface.name.clone()
+                                            ));
+                                            dhcp_mode.set(matches!(
+                                                config.method,
+                                                Ipv4Method::Auto
+                                            ));
+                                            address.set(
+                                                config
+                                                    .addresses
+                                                    .first()
+                                                    .map(ToString::to_string)
+                                                    .unwrap_or_default()
+                                            );
+                                            gateway.set(
+                                                config
+                                                    .gateway
+                                                    .map(|value| value.to_string())
+                                                    .unwrap_or_default()
+                                            );
+                                            dns.set(
+                                                config
+                                                    .dns
+                                                    .iter()
+                                                    .map(ToString::to_string)
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            );
+                                            ip_error.set(None);
+                                        },
+                                        span {
+                                            strong { "{iface.name}" }
+                                            small {
+                                                "{iface.iface_type:?} · {iface.state:?}"
+                                            }
+                                        }
+                                        span { class: "mono", "{address_text}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                form { class: "panel", onsubmit: request_ip_change,
+                    p { class: "eyebrow", "IPv4 configuration" }
+                    h2 { "{selected_interface_title}" }
+                    p { class: "muted mono", "{selected_interface_detail}" }
+                    div { class: "form-stack",
+                        fieldset {
+                            disabled: selected_interface_view.is_none() || ip_is_busy,
+                            legend { "Address assignment" }
+                            div { class: "segmented",
+                                label {
+                                    input {
+                                        r#type: "radio",
+                                        name: "ipv4-mode",
+                                        value: "DHCP",
+                                        checked: dhcp_mode_view,
+                                        onchange: move |_| dhcp_mode.set(true),
+                                    }
+                                    span { "DHCP" }
+                                }
+                                label {
+                                    input {
+                                        r#type: "radio",
+                                        name: "ipv4-mode",
+                                        value: "Static",
+                                        checked: !dhcp_mode_view,
+                                        onchange: move |_| dhcp_mode.set(false),
+                                    }
+                                    span { "Static" }
+                                }
+                            }
                         }
                         if !dhcp_mode_view {
-                            label {
-                                span { "Address / prefix" }
-                                input {
-                                    value: "{address_view}",
-                                    disabled: ip_is_busy,
-                                    oninput: move |event| address.set(event.value()),
+                            div { class: "form-stack",
+                                label {
+                                    span { "Address / CIDR" }
+                                    input {
+                                        class: "mono",
+                                        inputmode: "decimal",
+                                        value: "{address_view}",
+                                        aria_invalid: ip_fields_invalid,
+                                        disabled: ip_is_busy,
+                                        oninput: move |event| address.set(event.value()),
+                                    }
+                                }
+                                label {
+                                    span { "Gateway" }
+                                    input {
+                                        class: "mono",
+                                        inputmode: "decimal",
+                                        value: "{gateway_view}",
+                                        aria_invalid: ip_fields_invalid,
+                                        disabled: ip_is_busy,
+                                        oninput: move |event| gateway.set(event.value()),
+                                    }
+                                }
+                                label {
+                                    span { "DNS addresses" }
+                                    input {
+                                        class: "mono",
+                                        inputmode: "decimal",
+                                        value: "{dns_view}",
+                                        aria_describedby: "dns-hint",
+                                        aria_invalid: ip_fields_invalid,
+                                        disabled: ip_is_busy,
+                                        oninput: move |event| dns.set(event.value()),
+                                    }
+                                    small {
+                                        id: "dns-hint",
+                                        class: "muted",
+                                        "Separate multiple addresses with commas."
+                                    }
                                 }
                             }
-                            label {
-                                span { "Gateway" }
-                                input {
-                                    value: "{gateway_view}",
-                                    disabled: ip_is_busy,
-                                    oninput: move |event| gateway.set(event.value()),
-                                }
-                            }
-                            label {
-                                span { "DNS" }
-                                input {
-                                    value: "{dns_view}",
-                                    disabled: ip_is_busy,
-                                    oninput: move |event| dns.set(event.value()),
-                                }
-                            }
-                        }
-                        button {
-                            disabled: ip_is_busy,
-                            onclick: request_ip_change,
-                            if ip_is_busy { "Applying..." } else { "Apply" }
                         }
                         if let Some(message) = ip_error_view {
-                            div { class: "error-row", "{message}" }
+                            div {
+                                class: "message error",
+                                role: "alert",
+                                "{message}"
+                            }
                         }
-                    }
-                }
-            }
-
-            div { class: "panel",
-                h2 { "Wi-Fi" }
-                div { class: "metric-grid",
-                    Metric {
-                        label: "SSID".to_string(),
-                        value: snapshot_view.wifi_status.ssid.clone()
-                            .unwrap_or_else(|| "-".to_string()),
-                    }
-                    Metric {
-                        label: "Signal".to_string(),
-                        value: snapshot_view.wifi_status.signal
-                            .map(|signal| format!("{signal}%"))
-                            .unwrap_or_else(|| "-".to_string()),
-                    }
-                    Metric {
-                        label: "Security".to_string(),
-                        value: snapshot_view.wifi_status.security.clone()
-                            .map(|security| format!("{security:?}"))
-                            .unwrap_or_else(|| "-".to_string()),
-                    }
-                }
-                div { class: "connection-actions",
-                    button {
-                        disabled: wifi_is_busy,
-                        onclick: scan,
-                        if wifi_is_busy { "Working..." } else { "Scan" }
-                    }
-                    button {
-                        disabled: wifi_is_busy || selected_bssid_view.is_none(),
-                        onclick: connect_wifi,
-                        "Connect"
-                    }
-                }
-                div { class: "device-list",
-                    for network in wifi_networks_view {
-                        {
-                            let selected = selected_bssid_view.as_deref()
-                                == Some(network.bssid.as_str());
-                            let current = snapshot_view.wifi_status.ssid.as_deref()
-                                == Some(network.ssid.as_str());
-                            let row_class = if selected {
-                                "device-row selected"
-                            } else {
-                                "device-row"
-                            };
-                            let signal = network.signal
-                                .map(|signal| format!("{signal}%"))
-                                .unwrap_or_else(|| "-".to_string());
-                            let security = network.security.as_ref()
-                                .map(|security| format!("{security:?}"))
-                                .unwrap_or_else(|| "Unknown".to_string());
-                            let selected_network = network.clone();
-                            rsx! {
-                                button {
-                                    key: "{network.bssid}",
-                                    class: row_class,
-                                    disabled: wifi_is_busy,
-                                    onclick: move |_| selected_bssid.set(Some(
-                                        selected_network.bssid.clone()
-                                    )),
-                                    div {
-                                        strong { "{network.ssid}" }
-                                        span { "{security}" }
-                                    }
-                                    div {
-                                        span { "{signal}" }
-                                        if current { span { "Current" } }
-                                    }
+                        div { class: "form-actions",
+                            button {
+                                class: "primary",
+                                r#type: "submit",
+                                disabled: selected_interface_view.is_none() || ip_is_busy,
+                                if ip_is_busy {
+                                    "Applying…"
+                                } else {
+                                    "Apply configuration"
                                 }
                             }
                         }
                     }
                 }
-                label {
-                    span { "Password" }
-                    input {
-                        r#type: "password",
-                        value: "{wifi_password_view}",
-                        disabled: wifi_is_busy,
-                        oninput: move |event| wifi_password.set(event.value()),
+            }
+        }
+
+        if confirm_ip() {
+            div { class: "dialog-overlay",
+                dialog {
+                    id: "ip-confirm-dialog",
+                    open: true,
+                    aria_labelledby: "ip-confirm-title",
+                    div { class: "dialog-body",
+                        p { class: "eyebrow", "Confirm change" }
+                        h2 { id: "ip-confirm-title", "Apply network changes?" }
+                        p {
+                            class: "muted",
+                            "The device may briefly disconnect while its IPv4 configuration changes."
+                        }
+                        div { class: "dialog-actions",
+                            button {
+                                class: "secondary",
+                                r#type: "button",
+                                autofocus: true,
+                                disabled: ip_is_busy,
+                                onclick: move |_| {
+                                    confirm_ip.set(false);
+                                    pending_ip_change.set(None);
+                                },
+                                "Cancel"
+                            }
+                            button {
+                                class: "primary",
+                                r#type: "button",
+                                disabled: ip_is_busy,
+                                onclick: apply_ip,
+                                "Apply changes"
+                            }
+                        }
                     }
-                }
-                if let Some(message) = wifi_error_view {
-                    div { class: "error-row", "{message}" }
                 }
             }
+        }
 
-            if confirm_ip() {
-                dialog { open: true,
-                    p { "Apply this network configuration?" }
-                    div { class: "connection-actions",
-                        button {
-                            disabled: ip_is_busy,
-                            onclick: apply_ip,
-                            "Confirm"
-                        }
-                        button {
-                            disabled: ip_is_busy,
-                            onclick: move |_| {
-                                confirm_ip.set(false);
-                                pending_ip_change.set(None);
-                            },
-                            "Cancel"
-                        }
-                    }
-                }
+        if let Some(message) = success_message_view {
+            div {
+                class: "toast",
+                role: "status",
+                aria_live: "polite",
+                "{message}"
             }
         }
     }
 }
 
-#[component]
-fn Metric(label: String, value: String) -> Element {
-    rsx! {
-        div { class: "metric",
-            span { "{label}" }
-            strong { "{value}" }
-        }
+fn ipv4_method_label(method: &Ipv4Method) -> &'static str {
+    match method {
+        Ipv4Method::Auto => "DHCP",
+        Ipv4Method::Manual => "Static",
     }
 }
 

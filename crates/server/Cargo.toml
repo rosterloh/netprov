@@ -65,7 +65,7 @@ assets = [
     ["target/release/netprovd", "usr/bin/", "755"],
     ["target/release/netprov",  "usr/bin/", "755"],
     ["../../packaging/netprovd.service", "lib/systemd/system/", "644"],
-    ["../../packaging/README.md", "usr/share/doc/netprov/", "644"],
+    ["../../docs/src/reference/packaging.md", "usr/share/doc/netprov/README.md", "644"],
 ]
 conf-files = []
 maintainer-scripts = "packaging/debian/"

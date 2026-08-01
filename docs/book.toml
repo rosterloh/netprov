@@ -1,0 +1,23 @@
+[book]
+title = "netprov"
+description = "BLE-provisioned network configuration for headless embedded Linux"
+authors = ["Richard Osterloh"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/rosterloh/netprov"
+edit-url-template = "https://github.com/rosterloh/netprov/edit/main/docs/{path}"
+smart-punctuation = true
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+runnable = false

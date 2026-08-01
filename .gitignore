@@ -3,3 +3,7 @@ Cargo.lock.bak
 
 .superpowers/
 .worktrees/
+
+# mdBook output and local Superpowers artifacts
+/docs/book/
+/docs/superpowers/

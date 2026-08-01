@@ -116,8 +116,7 @@ a codebase review.
 
 ## [1.0.0] — 2026-04-24
 
-First tagged release. Implements the v1 goals of the
-[design spec](docs/superpowers/specs/2026-04-23-netprov-design.md).
+First tagged release. Implements the v1 goals.
 
 ### Added
 
@@ -203,7 +202,8 @@ First tagged release. Implements the v1 goals of the
 - Part 1 (core) and Part 2 (BLE + systemd + deb) implementation plans.
 - README with architecture diagram, install and dev quickstarts, build matrix,
   testing tier table.
-- Two-box BLE smoke-test runbook in `packaging/SMOKE-TEST.md`.
+- Two-box BLE smoke-test runbook, now at
+  `docs/src/guides/ble-smoke-test.md`.
 
 ### Security
 
@@ -230,8 +230,5 @@ The v1 release deliberately excludes:
 - Apply-with-rollback for write operations.
 - Running as a non-root user with `CAP_NET_ADMIN` + polkit.
 - Split `netprov` / `netprovd` packages.
-
-See the [design spec](docs/superpowers/specs/2026-04-23-netprov-design.md)
-§2 for the full list.
 
 [1.0.0]: https://github.com/rosterloh/netprov/releases/tag/v1.0.0

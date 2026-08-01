@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-01
+
 Post-release hardening pass over the BLE auth and transport path, found during
 a codebase review.
 
@@ -231,4 +233,6 @@ The v1 release deliberately excludes:
 - Running as a non-root user with `CAP_NET_ADMIN` + polkit.
 - Split `netprov` / `netprovd` packages.
 
+[Unreleased]: https://github.com/rosterloh/netprov/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rosterloh/netprov/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rosterloh/netprov/releases/tag/v1.0.0

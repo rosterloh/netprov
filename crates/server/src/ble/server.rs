@@ -28,6 +28,14 @@ pub struct BleServerConfig {
     pub adapter_name: Option<String>,
 }
 
+fn advertised_local_name(hostname: Option<&str>, model: &str) -> String {
+    hostname
+        .map(str::trim)
+        .filter(|hostname| !hostname.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("netprovd-{model}"))
+}
+
 /// Peer table shared by the GATT closures and the notify control loop:
 /// the `PeerSession` for whichever single peer is currently active, keyed by
 /// its address so a late subscribe (after auth) reuses rather than replaces it.
@@ -273,6 +281,7 @@ where
     info!("GATT service registered");
 
     // Advertise the netprov service UUID so a scanning client can find us.
+    let hostname = std::fs::read_to_string("/etc/hostname").ok();
     let adv = Advertisement {
         advertisement_type: AdvType::Peripheral,
         service_uuids: {
@@ -281,7 +290,7 @@ where
             s
         },
         discoverable: Some(true),
-        local_name: Some(format!("netprovd-{}", cfg.model)),
+        local_name: Some(advertised_local_name(hostname.as_deref(), &cfg.model)),
         ..Default::default()
     };
     let _adv_handle = adapter.advertise(adv).await?;
@@ -415,6 +424,19 @@ mod tests {
         MAX_FRAME_LEN, NONCE_LEN, Op, Request, auth_payload, client_tag, decode_response,
         encode_request, fragment, parse_frame, verify_server_tag,
     };
+
+    #[test]
+    fn advertisement_uses_hostname_with_model_fallback() {
+        assert_eq!(advertised_local_name(Some("eit\n"), "netprov-dev"), "eit");
+        assert_eq!(
+            advertised_local_name(Some("  "), "netprov-dev"),
+            "netprovd-netprov-dev"
+        );
+        assert_eq!(
+            advertised_local_name(None, "netprov-dev"),
+            "netprovd-netprov-dev"
+        );
+    }
 
     /// Simulates the exact GATT interaction order the SDK's BleClient now
     /// performs: read Info/nonce, write the auth tag, subscribe (notify),

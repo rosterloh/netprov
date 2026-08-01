@@ -1,4 +1,11 @@
-use crate::{MAIN_CSS, dashboard::Dashboard, operations::*};
+use crate::{
+    MAIN_CSS,
+    dashboard::Dashboard,
+    operations::{
+        DeviceSnapshot, DeviceSummary, SharedClient, connect_device, disconnect_device,
+        scan_ble_devices,
+    },
+};
 use dioxus::prelude::*;
 use netprov_sdk::PEER_ID_HINT;
 const MIN_WINDOW_HEIGHT: f64 = 600.0;
@@ -87,6 +94,10 @@ impl ConnectionLifecycle {
     fn discovery_enabled(&self) -> bool {
         self.phase == ConnectionPhase::Discovery
     }
+}
+
+fn discovery_operation_allowed(lifecycle: &ConnectionLifecycle, scan_state: &ScanState) -> bool {
+    lifecycle.discovery_enabled() && !matches!(scan_state, ScanState::Scanning)
 }
 
 fn capture_connected_device(peer: &str, selected: Option<&DeviceSummary>) -> ConnectedDevice {
@@ -255,7 +266,7 @@ pub(crate) fn App() -> Element {
     let is_disconnecting = lifecycle_view.phase == ConnectionPhase::Disconnecting;
     let discovery_enabled = lifecycle_view.discovery_enabled();
     let is_scanning = matches!(scan_state_view, ScanState::Scanning);
-    let can_connect = discovery_enabled && !current_peer.trim().is_empty();
+    let can_connect = discovery_enabled && !is_scanning && !current_peer.trim().is_empty();
     let connected_device_name = lifecycle_view
         .target
         .as_ref()
@@ -268,7 +279,7 @@ pub(crate) fn App() -> Element {
         .unwrap_or_default();
 
     let scan = move |_| {
-        if !lifecycle().discovery_enabled() {
+        if !discovery_operation_allowed(&lifecycle(), &scan_state()) {
             return;
         }
         scan_state.set(ScanState::Scanning);
@@ -289,7 +300,8 @@ pub(crate) fn App() -> Element {
     let connect = move |_| {
         let peer_value = peer();
         let key_path_value = key_path();
-        if !lifecycle().discovery_enabled() || peer_value.trim().is_empty() {
+        if !discovery_operation_allowed(&lifecycle(), &scan_state()) || peer_value.trim().is_empty()
+        {
             return;
         }
         lifecycle.with_mut(|lifecycle| {
@@ -515,6 +527,17 @@ mod tests {
         assert_eq!(target_window_height(720.0, 1_080.0), 720.0);
         assert_eq!(target_window_height(520.0, 1_080.0), 600.0);
         assert_eq!(target_window_height(1_200.0, 1_080.0), 1_000.0);
+    }
+
+    #[test]
+    fn discovery_operations_are_blocked_while_scanning() {
+        let lifecycle = ConnectionLifecycle::default();
+
+        assert!(discovery_operation_allowed(&lifecycle, &ScanState::Idle));
+        assert!(!discovery_operation_allowed(
+            &lifecycle,
+            &ScanState::Scanning
+        ));
     }
 
     #[test]

@@ -317,7 +317,7 @@ button.quiet {
 
 button.primary {
   border: 1px solid color-mix(in oklch, var(--accent), black 12%);
-  color: white;
+  color: var(--header);
   background: var(--accent);
   box-shadow: 0 5px 14px color-mix(in oklch, var(--accent), transparent 76%);
 }

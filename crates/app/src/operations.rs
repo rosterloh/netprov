@@ -57,31 +57,79 @@ pub(crate) fn static_ipv4_invalid_fields(
     gateway: &str,
     dns: &str,
 ) -> StaticIpv4Invalid {
-    let address = address.trim();
-    let address_valid = address.split_once('/').is_some_and(|(address, prefix)| {
-        !prefix.contains('/')
-            && address.parse::<Ipv4Addr>().is_ok()
-            && prefix.parse::<u8>().is_ok_and(|prefix| prefix <= 32)
-    });
+    let address = address.trim().parse();
     let gateway = gateway.trim();
-    let mut dns_addresses = dns
+    let gateway = match gateway {
+        "" => Ok(None),
+        value => value.parse().map(Some),
+    };
+    let dns = dns
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let has_dns = dns_addresses.clone().next().is_some();
+    let has_dns = dns.clone().next().is_some();
+    let dns = dns.map(str::parse).collect::<Result<Vec<_>, _>>();
+
+    let address_invalid = address.as_ref().map_or(true, |address| {
+        static_ipv4_invalid(&StaticIpv4 {
+            address: *address,
+            gateway: None,
+            dns: Vec::new(),
+        })
+        .address
+    });
+    let gateway_invalid = match (address.as_ref(), gateway.as_ref()) {
+        (_, Err(_)) => true,
+        (Ok(address), Ok(gateway)) => {
+            static_ipv4_invalid(&StaticIpv4 {
+                address: *address,
+                gateway: *gateway,
+                dns: Vec::new(),
+            })
+            .gateway
+        }
+        (Err(_), Ok(_)) => false,
+    };
+    let dns_invalid = !has_dns
+        || dns
+            .as_ref()
+            .map_or(true, |dns| dns.iter().any(invalid_dns_address));
 
     StaticIpv4Invalid {
-        address: !address_valid,
-        gateway: !gateway.is_empty() && gateway.parse::<Ipv4Addr>().is_err(),
-        dns: !has_dns || !dns_addresses.all(|value| value.parse::<Ipv4Addr>().is_ok()),
+        address: address_invalid,
+        gateway: gateway_invalid,
+        dns: dns_invalid,
     }
 }
 
-pub(crate) fn wifi_converged(status: &WifiStatus, requested_ssid: &str) -> bool {
+fn invalid_dns_address(address: &Ipv4Addr) -> bool {
+    address.is_unspecified() || address.is_multicast() || address.is_broadcast()
+}
+
+fn static_ipv4_invalid(config: &StaticIpv4) -> StaticIpv4Invalid {
+    let address = config.address.addr();
+    let prefix = config.address.prefix_len();
+
+    StaticIpv4Invalid {
+        address: !(1..=30).contains(&prefix)
+            || address.is_loopback()
+            || address.is_multicast()
+            || address.is_broadcast()
+            || address.is_unspecified()
+            || address == config.address.broadcast()
+            || address == config.address.network(),
+        gateway: config
+            .gateway
+            .is_some_and(|gateway| !config.address.contains(&gateway) || gateway == address),
+        dns: config.dns.iter().any(invalid_dns_address),
+    }
+}
+
+fn wifi_converged(status: &WifiStatus, requested_ssid: &str) -> bool {
     status.ssid.as_deref() == Some(requested_ssid)
 }
 
-pub(crate) fn ip_config_converged(actual: &IpConfig, requested: Option<&StaticIpv4>) -> bool {
+fn ip_config_converged(actual: &IpConfig, requested: Option<&StaticIpv4>) -> bool {
     match requested {
         None => actual.method == Ipv4Method::Auto,
         Some(requested) => {
@@ -162,11 +210,7 @@ pub(crate) fn sort_wifi_networks(networks: &mut [WifiNetwork]) {
     networks.sort_by_key(|network| std::cmp::Reverse(network.signal.unwrap_or(0)));
 }
 
-pub(crate) fn parse_static_ipv4(
-    address: &str,
-    gateway: &str,
-    dns: &str,
-) -> Result<StaticIpv4, String> {
+fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIpv4, String> {
     let address = address
         .trim()
         .parse()
@@ -192,11 +236,22 @@ pub(crate) fn parse_static_ipv4(
     if dns.is_empty() {
         return Err("Enter at least one DNS address.".into());
     }
-    Ok(StaticIpv4 {
+    let config = StaticIpv4 {
         address,
         gateway,
         dns,
-    })
+    };
+    let invalid = static_ipv4_invalid(&config);
+    if invalid.address {
+        return Err("Enter a valid IPv4 address and CIDR prefix.".into());
+    }
+    if invalid.gateway {
+        return Err("Enter a valid IPv4 gateway.".into());
+    }
+    if invalid.dns {
+        return Err("Enter valid comma-separated DNS addresses.".into());
+    }
+    Ok(config)
 }
 
 pub(crate) fn prepare_ip_change(
@@ -215,10 +270,7 @@ pub(crate) fn prepare_ip_change(
     Ok((iface, config))
 }
 
-pub(crate) fn wifi_credential(
-    security: Option<&Security>,
-    password: &str,
-) -> Result<WifiCredential, String> {
+fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCredential, String> {
     if matches!(security, Some(Security::Open)) {
         return Ok(WifiCredential::Open);
     }
@@ -325,9 +377,7 @@ pub(crate) async fn connect_device(
     Ok((Arc::new(Mutex::new(client)), snapshot))
 }
 
-pub(crate) async fn load_snapshot(
-    client: &mut Netprov<BleClient>,
-) -> Result<DeviceSnapshot, String> {
+async fn load_snapshot(client: &mut Netprov<BleClient>) -> Result<DeviceSnapshot, String> {
     let interfaces = client
         .list_interfaces()
         .await
@@ -402,6 +452,44 @@ mod tests {
         assert!(parse_static_ipv4("192.168.1.20/99", "", "1.1.1.1").is_err());
         assert!(parse_static_ipv4("192.168.1.20/24", "999.1.1.1", "1.1.1.1").is_err());
         assert!(parse_static_ipv4("192.168.1.20/24", "", "").is_err());
+    }
+
+    #[test]
+    fn rejects_static_ipv4_configs_rejected_by_server() {
+        for (address, gateway, dns) in [
+            ("10.0.0.1/0", "", "1.1.1.1"),
+            ("10.0.0.1/31", "", "1.1.1.1"),
+            ("10.0.0.1/32", "", "1.1.1.1"),
+            ("127.0.0.2/8", "", "1.1.1.1"),
+            ("224.0.0.1/24", "", "1.1.1.1"),
+            ("255.255.255.255/24", "", "1.1.1.1"),
+            ("0.0.0.0/8", "", "1.1.1.1"),
+            ("192.168.1.255/24", "", "1.1.1.1"),
+            ("192.168.1.0/24", "", "1.1.1.1"),
+            ("192.168.1.10/24", "10.0.0.1", "1.1.1.1"),
+            ("192.168.1.10/24", "192.168.1.10", "1.1.1.1"),
+            ("192.168.1.10/24", "", "0.0.0.0"),
+            ("192.168.1.10/24", "", "224.0.0.1"),
+            ("192.168.1.10/24", "", "255.255.255.255"),
+        ] {
+            assert!(
+                parse_static_ipv4(address, gateway, dns).is_err(),
+                "server-invalid config accepted: {address}, {gateway}, {dns}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_static_ipv4_configs_accepted_by_server() {
+        for (address, gateway, dns) in [
+            ("10.0.0.1/1", "", "127.0.0.1"),
+            ("10.0.0.1/30", "10.0.0.2", "1.1.1.1"),
+        ] {
+            assert!(
+                parse_static_ipv4(address, gateway, dns).is_ok(),
+                "server-valid config rejected: {address}, {gateway}, {dns}"
+            );
+        }
     }
 
     #[test]
@@ -522,6 +610,27 @@ mod tests {
         let invalid =
             static_ipv4_invalid_fields("192.168.1.20/24", "not-a-gateway", "not-a-dns-address");
         assert!(!invalid.address);
+        assert!(invalid.gateway);
+        assert!(invalid.dns);
+
+        let invalid = static_ipv4_invalid_fields("192.168.1.0/24", "192.168.1.1", "1.1.1.1");
+        assert!(invalid.address);
+        assert!(!invalid.gateway);
+        assert!(!invalid.dns);
+
+        let invalid = static_ipv4_invalid_fields("192.168.1.20/24", "10.0.0.1", "1.1.1.1");
+        assert!(!invalid.address);
+        assert!(invalid.gateway);
+        assert!(!invalid.dns);
+
+        let invalid = static_ipv4_invalid_fields("192.168.1.20/24", "192.168.1.1", "224.0.0.1");
+        assert!(!invalid.address);
+        assert!(!invalid.gateway);
+        assert!(invalid.dns);
+
+        let invalid =
+            static_ipv4_invalid_fields("192.168.1.0/24", "not-a-gateway", "not-a-dns-address");
+        assert!(invalid.address);
         assert!(invalid.gateway);
         assert!(invalid.dns);
     }

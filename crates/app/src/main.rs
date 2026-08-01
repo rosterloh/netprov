@@ -13,6 +13,15 @@ use tokio::sync::Mutex;
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 const CONVERGENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
+const MIN_WINDOW_HEIGHT: f64 = 600.0;
+const SCREEN_MARGIN: f64 = 80.0;
+
+fn target_window_height(content_height: f64, screen_height: f64) -> f64 {
+    content_height.clamp(
+        MIN_WINDOW_HEIGHT,
+        (screen_height - SCREEN_MARGIN).max(MIN_WINDOW_HEIGHT),
+    )
+}
 
 fn main() {
     dioxus::LaunchBuilder::desktop()
@@ -309,6 +318,46 @@ fn App() -> Element {
     let mut lifecycle = use_signal(ConnectionLifecycle::default);
     let mut close_requested = use_signal(|| false);
     let window = dioxus::desktop::use_window();
+
+    let resize_window = window.clone();
+    use_future(move || {
+        let resize_window = resize_window.clone();
+        async move {
+            let mut measurements = document::eval(
+                r#"
+            const header = document.querySelector('.app-header');
+            const app = document.querySelector('#app');
+            const report = () => dioxus.send(Math.ceil(
+                header.getBoundingClientRect().height + app.scrollHeight
+            ));
+            const observer = new ResizeObserver(report);
+            observer.observe(header);
+            observer.observe(app);
+            report();
+            await new Promise(() => {});
+            "#,
+            );
+
+            while let Ok(content_height) = measurements.recv::<f64>().await {
+                if resize_window.is_maximized() || resize_window.fullscreen().is_some() {
+                    continue;
+                }
+                let scale = resize_window.scale_factor();
+                let current = resize_window.inner_size().to_logical::<f64>(scale);
+                let screen_height = resize_window
+                    .current_monitor()
+                    .map(|monitor| monitor.size().to_logical::<f64>(scale).height)
+                    .unwrap_or(current.height + SCREEN_MARGIN);
+                let height = target_window_height(content_height, screen_height);
+                if (current.height - height).abs() >= 1.0 {
+                    resize_window.set_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(
+                        current.width,
+                        height,
+                    ));
+                }
+            }
+        }
+    });
 
     let close_window = window.clone();
     let _close_handler = dioxus::desktop::use_wry_event_handler(move |event, _| {
@@ -1757,6 +1806,13 @@ impl From<BleDevice> for DeviceSummary {
 mod tests {
     use super::*;
     use netprov_protocol::{IfaceState, IfaceType, Ipv4Method, WifiNetwork};
+
+    #[test]
+    fn window_height_tracks_content_with_screen_bounds() {
+        assert_eq!(target_window_height(720.0, 1_080.0), 720.0);
+        assert_eq!(target_window_height(520.0, 1_080.0), 600.0);
+        assert_eq!(target_window_height(1_200.0, 1_080.0), 1_000.0);
+    }
 
     #[tokio::test]
     async fn rejects_empty_peer_before_connecting() {

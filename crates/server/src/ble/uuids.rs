@@ -14,6 +14,9 @@ pub const CHALLENGE_UUID: Uuid = Uuid::from_u128(proto::CHALLENGE_UUID);
 pub const AUTH_RESPONSE_UUID: Uuid = Uuid::from_u128(proto::AUTH_RESPONSE_UUID);
 pub const REQUEST_UUID: Uuid = Uuid::from_u128(proto::REQUEST_UUID);
 
+pub const CTS_SERVICE_UUID: Uuid = Uuid::from_u128(proto::CTS_SERVICE_UUID);
+pub const CURRENT_TIME_UUID: Uuid = Uuid::from_u128(proto::CURRENT_TIME_UUID);
+
 /// `Response` is a notify characteristic. We reuse a single UUID ("request"
 /// write + "response" notify) by giving it both properties. This matches how
 /// the BlueZ layer actually exposes the endpoint: one characteristic, two

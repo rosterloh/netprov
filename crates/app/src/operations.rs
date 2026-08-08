@@ -368,7 +368,10 @@ pub(crate) async fn connect_device(
     }
     // Best-effort: an older daemon has no Current Time Service, and a clock
     // sync must never block provisioning — this is the whole point of #32,
-    // "the user never thinks about it".
+    // "the user never thinks about it". The error is intentionally discarded
+    // rather than logged: netprov-app has no logging facility (no `tracing`
+    // or similar dependency/usage in this crate), so a clamp rejection or
+    // timedated failure here is currently invisible for field debugging.
     let _ = client.inner().set_time(std::time::SystemTime::now()).await;
     let snapshot = match load_snapshot(&mut client).await {
         Ok(snapshot) => snapshot,

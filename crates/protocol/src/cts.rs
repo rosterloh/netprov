@@ -32,6 +32,10 @@ impl std::error::Error for CtsError {}
 /// Encodes `unix_secs` (UTC) as a 10-byte CTS Current Time value. Fractions256
 /// (sub-second) and Adjust Reason are always 0: netprov has no sub-second
 /// clock source and always sets the time manually.
+///
+/// Callers must pass a `unix_secs` whose year falls within
+/// `decode_current_time`'s accepted range (1582..=9999); this function does
+/// not validate its input.
 pub fn encode_current_time(unix_secs: i64) -> [u8; CTS_VALUE_LEN] {
     let days = unix_secs.div_euclid(86_400);
     let secs_of_day = unix_secs.rem_euclid(86_400);

@@ -59,7 +59,7 @@ fn time_in_clamp(unix_secs: i64) -> bool {
 
 /// The server's own wall clock, in Unix seconds. A free function (like
 /// `info_payload`) because the CurrentTime *read* is unauthenticated and
-/// stateless — see `PeerSession::on_time`.
+/// stateless — see `server.rs`'s `on_time_read` closure.
 pub fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -188,15 +188,14 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             .map(|tag| tag.to_vec())
     }
 
-    /// CurrentTime read handler — unauthenticated, like `on_info`: it only
-    /// discloses the server's own wall clock, which leaks nothing the
-    /// advertisement doesn't.
-    pub fn on_time(&self) -> Vec<u8> {
-        netprov_protocol::encode_current_time(now_unix_secs()).to_vec()
-    }
-
     /// CurrentTime write handler — sets the system clock via `clock`, gated
     /// on this peer already holding an authenticated session.
+    ///
+    /// Unlike `on_request`, this does not check `dispatch_state.closed`: it
+    /// makes no async dispatch that could race a concurrent `abort_handles()`
+    /// call (no spawned task, no handle to leak) — it runs synchronously
+    /// against the clock within this single GATT write closure invocation,
+    /// so there is nothing for a `closed` check to protect against.
     pub async fn on_set_time(
         &self,
         value: &[u8],

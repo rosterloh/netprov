@@ -714,4 +714,53 @@ mod tests {
             "ending the peer held in `current` must clear it"
         );
     }
+
+    /// Covers the `on_time_write` closure's address-matching, which the four
+    /// clock tests in `conn.rs` all bypass by calling `PeerSession::on_set_time`
+    /// directly: a peer that never authenticated (indeed, never touched this
+    /// session at all) must be refused even though *some* peer is currently
+    /// authenticated, and the clock must never be consulted for it.
+    #[tokio::test]
+    async fn on_time_write_refuses_a_peer_that_never_authenticated() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
+        let (_current, _notify_tx, _notify_rx, handlers) = build_gatt_handlers(
+            psk,
+            "m".into(),
+            facade.clone(),
+            rate_limiter.clone(),
+            clock.clone(),
+        );
+
+        let addr_a = Address::new([1, 2, 3, 4, 5, 6]);
+        let addr_b = Address::new([9, 9, 9, 9, 9, 9]);
+
+        // A authenticates.
+        let nonce = (handlers.on_nonce_read)(addr_a);
+        let mut n = [0u8; NONCE_LEN];
+        n.copy_from_slice(&nonce);
+        let client_nonce = [0x77u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
+        assert!(matches!(
+            (handlers.on_auth_write)(addr_a, payload.to_vec()),
+            AuthOutcome::Ok(_)
+        ));
+
+        // B, who never authenticated, writes a valid CTS value.
+        let value = netprov_protocol::encode_current_time(1_735_689_600).to_vec();
+        let result = (handlers.on_time_write)(addr_b, value).await;
+
+        assert_eq!(
+            result,
+            Err(crate::ble::conn::TimeSetError::NotAuthenticated),
+            "a peer with no session at all must be refused, same as an \
+             unauthenticated one"
+        );
+        assert!(
+            clock.last_set_unix_secs.lock().unwrap().is_none(),
+            "the clock must never be consulted for an unauthenticated write"
+        );
+    }
 }

@@ -9,7 +9,7 @@
 #![cfg(feature = "live-ble")]
 
 use netprov_server::{
-    ClockFacade, MockFacade, RateLimiter, TimedateFacade,
+    ClockFacade, MockClock, MockFacade, RateLimiter,
     ble::{BleServerConfig, run_ble_server},
 };
 use std::sync::Arc;
@@ -19,11 +19,7 @@ use std::sync::Arc;
 async fn end_to_end_list_interfaces() {
     let psk = [0x42u8; 32];
     let facade = Arc::new(MockFacade::new());
-    let clock: Arc<dyn ClockFacade> = Arc::new(
-        TimedateFacade::new()
-            .await
-            .expect("timedated available for this test"),
-    );
+    let clock: Arc<dyn ClockFacade> = Arc::new(MockClock::new());
     let rl = Arc::new(RateLimiter::with_defaults());
 
     // Server runs in a task; client discovers + connects locally.

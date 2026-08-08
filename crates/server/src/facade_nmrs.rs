@@ -135,6 +135,83 @@ async fn get_settings_connection_for_iface(
     Ok(settings)
 }
 
+async fn find_wifi_connection_by_ssid(
+    conn: &zbus::Connection,
+    ssid: &str,
+) -> Result<Option<zbus::zvariant::OwnedObjectPath>, NetError> {
+    let settings = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager/Settings",
+        "org.freedesktop.NetworkManager.Settings",
+    )
+    .await
+    .map_err(nm_err)?;
+    let paths: Vec<zbus::zvariant::OwnedObjectPath> = settings
+        .call("ListConnections", &())
+        .await
+        .map_err(nm_err)?;
+    for path in paths {
+        let c = zbus::Proxy::new(
+            conn,
+            "org.freedesktop.NetworkManager",
+            path.as_str(),
+            "org.freedesktop.NetworkManager.Settings.Connection",
+        )
+        .await
+        .map_err(nm_err)?;
+        let s: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        > = c.call("GetSettings", &()).await.map_err(nm_err)?;
+        let Some(section) = s.get("connection") else {
+            continue;
+        };
+        let is_wifi = section
+            .get("type")
+            .and_then(|v| TryInto::<String>::try_into(v.try_clone().ok()?).ok())
+            .is_some_and(|ty| ty == "802-11-wireless");
+        let matches_ssid = section
+            .get("id")
+            .and_then(|v| TryInto::<String>::try_into(v.try_clone().ok()?).ok())
+            .is_some_and(|id| id == ssid);
+        if is_wifi && matches_ssid {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+// Polls the ActiveConnection's `State` until it reaches ACTIVATED (2) or
+// DEACTIVATED (4); the caller's OP_TIMEOUT wrapper bounds the total wait.
+async fn wait_for_activation(
+    conn: &zbus::Connection,
+    active_path: &zbus::zvariant::OwnedObjectPath,
+) -> Result<(), NetError> {
+    let ac = zbus::Proxy::new(
+        conn,
+        "org.freedesktop.NetworkManager",
+        active_path.as_str(),
+        "org.freedesktop.NetworkManager.Connection.Active",
+    )
+    .await
+    .map_err(nm_err)?;
+    loop {
+        let state: u32 = ac.get_property("State").await.map_err(nm_err)?;
+        match state {
+            2 => return Ok(()), // NM_ACTIVE_CONNECTION_STATE_ACTIVATED
+            4 => {
+                // NM_ACTIVE_CONNECTION_STATE_DEACTIVATED
+                let reason: u32 = ac.get_property("StateReason").await.unwrap_or(0);
+                return Err(NetError::NetworkManager(format!(
+                    "wifi activation failed (state reason code {reason}); check credentials"
+                )));
+            }
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
 async fn read_method(conn: &zbus::Connection, dev: &zbus::Proxy<'_>) -> Option<Ipv4Method> {
     let active: zbus::zvariant::OwnedObjectPath =
         dev.get_property("ActiveConnection").await.ok()?;
@@ -636,17 +713,48 @@ impl NetworkFacade for NmrsFacade {
             .await
             .map_err(nm_err)?;
 
-            // AddAndActivateConnection args:
-            //   connection (a{sa{sv}})     — the settings dict built above
-            //   device     (o)             — the wireless device path
-            //   specific_object (o)        — use "/" for "no preference"
-            // Returns a tuple (o, o): (new_connection_path, active_connection_path).
             let specific: zbus::zvariant::ObjectPath = "/".try_into().map_err(nm_err)?;
-            let _: (OwnedValue, OwnedValue) = nm
-                .call("AddAndActivateConnection", &(conn, wifi_path, specific))
-                .await
-                .map_err(nm_err)?;
-            Ok::<(), NetError>(())
+
+            // Reuse an existing profile for this SSID instead of accumulating a new
+            // one on every call; only fall back to AddAndActivateConnection when
+            // none exists yet.
+            let active_path: zbus::zvariant::OwnedObjectPath =
+                match find_wifi_connection_by_ssid(&self.zbus, ssid).await? {
+                    Some(existing_path) => {
+                        let settings = zbus::Proxy::new(
+                            &self.zbus,
+                            "org.freedesktop.NetworkManager",
+                            existing_path.as_str(),
+                            "org.freedesktop.NetworkManager.Settings.Connection",
+                        )
+                        .await
+                        .map_err(nm_err)?;
+                        settings
+                            .call::<_, _, ()>("Update", &(conn,))
+                            .await
+                            .map_err(nm_err)?;
+                        nm.call::<_, _, zbus::zvariant::OwnedObjectPath>(
+                            "ActivateConnection",
+                            &(existing_path, wifi_path, specific),
+                        )
+                        .await
+                        .map_err(nm_err)?
+                    }
+                    None => {
+                        // AddAndActivateConnection args:
+                        //   connection (a{sa{sv}})     — the settings dict built above
+                        //   device     (o)             — the wireless device path
+                        //   specific_object (o)        — use "/" for "no preference"
+                        // Returns a tuple (o, o): (new_connection_path, active_connection_path).
+                        let (_new_conn, active): (OwnedValue, OwnedValue) = nm
+                            .call("AddAndActivateConnection", &(conn, wifi_path, specific))
+                            .await
+                            .map_err(nm_err)?;
+                        active.try_into().map_err(nm_err)?
+                    }
+                };
+
+            wait_for_activation(&self.zbus, &active_path).await
         })
         .await
         .map_err(|_| NetError::Timeout)?

@@ -27,6 +27,46 @@ use tracing::{debug, warn};
 pub type NotifyTx = mpsc::UnboundedSender<(String, Vec<u8>)>;
 pub type NotifyRx = mpsc::UnboundedReceiver<(String, Vec<u8>)>;
 
+/// Time-write outcome, mirroring `AuthOutcome`'s separation of *why* a
+/// privileged write was refused (the same reasoning as #18, applied to the
+/// clock): the GATT layer maps each variant to a distinct ATT error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeSetError {
+    /// No authenticated session for this peer — the same bar `on_request`
+    /// enforces. Setting a device's clock can silently expire or revive
+    /// certificates, so link-layer encryption alone is not enough.
+    NotAuthenticated,
+    /// The 10-byte CTS value failed to parse.
+    Malformed(String),
+    /// Parsed, but outside the plausible window.
+    OutOfClamp,
+    /// The clock facade (timedated) refused or failed the write.
+    ClockFailed(String),
+}
+
+/// Lower bound of the sanity clamp: a hardcoded date comfortably before this
+/// release, bumped at each release. A device with no working clock always
+/// starts before this instant, so any write below it is implausible; the
+/// upper bound is `CLAMP_WINDOW_SECS` past it rather than "now" because the
+/// device's own clock is exactly what cannot be trusted here.
+const CLAMP_LOWER_BOUND_UNIX_SECS: i64 = 1_735_689_600; // 2025-01-01T00:00:00Z
+const CLAMP_WINDOW_SECS: i64 = 10 * 365 * 24 * 3600; // ~10 years
+
+fn time_in_clamp(unix_secs: i64) -> bool {
+    (CLAMP_LOWER_BOUND_UNIX_SECS..=CLAMP_LOWER_BOUND_UNIX_SECS + CLAMP_WINDOW_SECS)
+        .contains(&unix_secs)
+}
+
+/// The server's own wall clock, in Unix seconds. A free function (like
+/// `info_payload`) because the CurrentTime *read* is unauthenticated and
+/// stateless — see `PeerSession::on_time`.
+pub fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The Info characteristic's payload: constant for a given model.
 ///
 /// A free function because Info is served without a session. Reading it used
@@ -146,6 +186,36 @@ impl<F: NetworkFacade + 'static> PeerSession<F> {
             .unwrap()
             .as_ref()
             .map(|tag| tag.to_vec())
+    }
+
+    /// CurrentTime read handler — unauthenticated, like `on_info`: it only
+    /// discloses the server's own wall clock, which leaks nothing the
+    /// advertisement doesn't.
+    pub fn on_time(&self) -> Vec<u8> {
+        netprov_protocol::encode_current_time(now_unix_secs()).to_vec()
+    }
+
+    /// CurrentTime write handler — sets the system clock via `clock`, gated
+    /// on this peer already holding an authenticated session.
+    pub async fn on_set_time(
+        &self,
+        value: &[u8],
+        clock: &dyn crate::clock::ClockFacade,
+    ) -> Result<(), TimeSetError> {
+        if !self.session.lock().unwrap().is_authenticated() {
+            warn!("dropping time write from unauthenticated peer");
+            return Err(TimeSetError::NotAuthenticated);
+        }
+        let unix_secs = netprov_protocol::decode_current_time(value)
+            .map_err(|e| TimeSetError::Malformed(e.to_string()))?;
+        if !time_in_clamp(unix_secs) {
+            warn!(unix_secs, "rejecting implausible time write");
+            return Err(TimeSetError::OutOfClamp);
+        }
+        clock
+            .set_time(unix_secs)
+            .await
+            .map_err(|e| TimeSetError::ClockFailed(e.0))
     }
 
     /// Aborts all in-flight dispatch tasks and marks the session closed so
@@ -480,5 +550,59 @@ mod tests {
             "a request racing abort_handles must not deliver a response \
              onto the shared notify channel"
         );
+    }
+
+    use crate::clock_mock::MockClock;
+
+    /// Mirrors `unauthenticated_request_leaves_no_reassembler_state`: a time
+    /// write must be refused before any parsing happens, and the clock must
+    /// never be touched.
+    #[tokio::test]
+    async fn unauthenticated_time_write_is_refused_and_clock_untouched() {
+        let (peer, _rx) = new_peer();
+        let clock = MockClock::new();
+        let value = netprov_protocol::encode_current_time(1_735_689_600).to_vec();
+
+        let err = peer.on_set_time(&value, &clock).await.unwrap_err();
+        assert_eq!(err, TimeSetError::NotAuthenticated);
+        assert!(clock.last_set_unix_secs.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_write_reaches_the_clock() {
+        let (peer, _rx) = new_peer();
+        authenticate(&peer);
+        let clock = MockClock::new();
+        let value = netprov_protocol::encode_current_time(1_735_689_600).to_vec();
+
+        peer.on_set_time(&value, &clock).await.unwrap();
+        assert_eq!(
+            *clock.last_set_unix_secs.lock().unwrap(),
+            Some(1_735_689_600)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_value_is_rejected_before_touching_the_clock() {
+        let (peer, _rx) = new_peer();
+        authenticate(&peer);
+        let clock = MockClock::new();
+
+        let err = peer.on_set_time(&[0u8; 3], &clock).await.unwrap_err();
+        assert!(matches!(err, TimeSetError::Malformed(_)));
+        assert!(clock.last_set_unix_secs.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn out_of_clamp_time_is_rejected() {
+        let (peer, _rx) = new_peer();
+        authenticate(&peer);
+        let clock = MockClock::new();
+        // Well before the clamp's lower bound.
+        let value = netprov_protocol::encode_current_time(0).to_vec();
+
+        let err = peer.on_set_time(&value, &clock).await.unwrap_err();
+        assert_eq!(err, TimeSetError::OutOfClamp);
+        assert!(clock.last_set_unix_secs.lock().unwrap().is_none());
     }
 }

@@ -366,6 +366,10 @@ pub(crate) async fn connect_device(
         let _ = client.inner().disconnect().await;
         return Err(error);
     }
+    // Best-effort: an older daemon has no Current Time Service, and a clock
+    // sync must never block provisioning — this is the whole point of #32,
+    // "the user never thinks about it".
+    let _ = client.inner().set_time(std::time::SystemTime::now()).await;
     let snapshot = match load_snapshot(&mut client).await {
         Ok(snapshot) => snapshot,
         Err(err) => {

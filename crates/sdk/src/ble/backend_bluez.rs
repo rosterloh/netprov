@@ -24,6 +24,8 @@ const INFO_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::INFO_UUID);
 const CHALLENGE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CHALLENGE_UUID);
 const AUTH_RESPONSE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
 const REQUEST_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::REQUEST_UUID);
+const CTS_SERVICE_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CTS_SERVICE_UUID);
+const CURRENT_TIME_UUID: bluer::Uuid = bluer::Uuid::from_u128(proto_uuids::CURRENT_TIME_UUID);
 
 /// Bound on the teardown. Short: it runs on the exit path, where the link is
 /// often already gone and there is nothing left to wait for.
@@ -51,6 +53,7 @@ pub struct BleClient {
     challenge: Characteristic,
     auth: Characteristic,
     request: Characteristic,
+    current_time: Option<Characteristic>,
     notify: CharacteristicReader,
     next_id: u16,
 }
@@ -156,6 +159,24 @@ impl BleClient {
         // subscriptions.
         let notify = request.notify_io().await?;
 
+        // CTS is a second, optional service: an older daemon simply won't
+        // have it, and that must not fail connect().
+        let mut current_time = None;
+        if let Ok(services) = device.services().await {
+            for s in services {
+                if s.uuid().await.ok() != Some(CTS_SERVICE_UUID) {
+                    continue;
+                }
+                if let Ok(chars) = s.characteristics().await {
+                    for c in chars {
+                        if c.uuid().await.ok() == Some(CURRENT_TIME_UUID) {
+                            current_time = Some(c);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             device,
             info: info.ok_or_else(|| SdkError::Ble("INFO characteristic missing".into()))?,
@@ -164,6 +185,7 @@ impl BleClient {
             auth: auth
                 .ok_or_else(|| SdkError::Ble("AUTH_RESPONSE characteristic missing".into()))?,
             request,
+            current_time,
             notify,
             next_id: 1,
         })
@@ -175,6 +197,23 @@ impl BleClient {
 
     pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
         <Self as ProvisioningClient>::request(self, op).await
+    }
+
+    /// Writes this host's current wall-clock time to the device's Current
+    /// Time Service, if it exposes one. `Ok(false)` (not an error) means an
+    /// older daemon without CTS support — callers can call this
+    /// unconditionally after connecting.
+    pub async fn set_time(&self, when: std::time::SystemTime) -> Result<bool, SdkError> {
+        let Some(characteristic) = self.current_time.as_ref() else {
+            return Ok(false);
+        };
+        let unix_secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| SdkError::Ble("system clock is before the Unix epoch".into()))?
+            .as_secs() as i64;
+        let bytes = netprov_protocol::encode_current_time(unix_secs);
+        characteristic.write(&bytes).await?;
+        Ok(true)
     }
 
     /// Drops the link. BlueZ reference-counts the connection and releases it

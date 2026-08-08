@@ -7,6 +7,8 @@ use netprov_server::keygen::{KeygenArgs, run_keygen};
 use netprov_server::logging::{log_startup_banner, spawn_dev_key_warn_loop};
 #[cfg(feature = "mock")]
 use netprov_server::server_loop::run_tcp_server;
+#[cfg(feature = "live-ble")]
+use netprov_server::{ClockFacade, TimedateFacade};
 use netprov_server::{LoadOptions, LoadedKey, RateLimiter, load_key};
 #[cfg(feature = "live-ble")]
 use netprov_server::{
@@ -84,13 +86,14 @@ async fn main() -> anyhow::Result<()> {
             log_startup_banner(&key.source);
             let _warn = spawn_dev_key_warn_loop(key.source.clone());
             let facade = Arc::new(NmrsFacade::new().await?);
+            let clock: Arc<dyn ClockFacade> = Arc::new(TimedateFacade::new().await?);
             let rl = Arc::new(RateLimiter::with_defaults());
             let cfg = BleServerConfig {
                 psk: key.psk,
                 model,
                 adapter_name: adapter,
             };
-            let result = run_ble_server(cfg, facade, rl, notify_ready).await;
+            let result = run_ble_server(cfg, facade, clock, rl, notify_ready).await;
             notify_stopping();
             result?;
         }

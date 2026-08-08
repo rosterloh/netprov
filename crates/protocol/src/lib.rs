@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod codec;
+pub mod cts;
 pub mod dto;
 pub mod error;
 pub mod framing;
@@ -11,6 +12,7 @@ pub mod uuids;
 
 pub use auth::*;
 pub use codec::*;
+pub use cts::*;
 pub use dto::*;
 pub use error::*;
 pub use framing::*;

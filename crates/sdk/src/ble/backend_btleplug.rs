@@ -43,6 +43,8 @@ const INFO_UUID: Uuid = Uuid::from_u128(proto_uuids::INFO_UUID);
 const CHALLENGE_UUID: Uuid = Uuid::from_u128(proto_uuids::CHALLENGE_UUID);
 const AUTH_RESPONSE_UUID: Uuid = Uuid::from_u128(proto_uuids::AUTH_RESPONSE_UUID);
 const REQUEST_UUID: Uuid = Uuid::from_u128(proto_uuids::REQUEST_UUID);
+const CTS_SERVICE_UUID: Uuid = Uuid::from_u128(proto_uuids::CTS_SERVICE_UUID);
+const CURRENT_TIME_UUID: Uuid = Uuid::from_u128(proto_uuids::CURRENT_TIME_UUID);
 
 /// How long `connect` keeps scanning for the requested peer before giving up.
 const PEER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,6 +80,7 @@ pub struct BleClient {
     challenge: Characteristic,
     auth: Characteristic,
     request: Characteristic,
+    current_time: Option<Characteristic>,
     /// Taken once in `connect`, before subscribing, so no response fragment
     /// can be dropped between subscription and the first read.
     notifications: Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
@@ -138,6 +141,14 @@ impl BleClient {
         let request = find(REQUEST_UUID)
             .ok_or_else(|| SdkError::Ble("REQUEST characteristic missing".into()))?;
 
+        // CTS is a second, optional service: an older daemon simply won't
+        // have it, and that must not fail connect(). Note this isn't scoped
+        // to SERVICE_UUID like `find` above — it's a different service.
+        let current_time = chars
+            .iter()
+            .find(|c| c.uuid == CURRENT_TIME_UUID && c.service_uuid == CTS_SERVICE_UUID)
+            .cloned();
+
         // Take the notification stream *before* subscribing: btleplug keeps
         // the stream valid across connections, and grabbing it first means a
         // fragment cannot land in the gap between subscribe and first read.
@@ -164,6 +175,7 @@ impl BleClient {
             auth: find(AUTH_RESPONSE_UUID)
                 .ok_or_else(|| SdkError::Ble("AUTH_RESPONSE characteristic missing".into()))?,
             request,
+            current_time,
             peripheral,
             notifications,
             next_id: 1,
@@ -176,6 +188,25 @@ impl BleClient {
 
     pub async fn request(&mut self, op: Op) -> Result<OpResult, SdkError> {
         <Self as ProvisioningClient>::request(self, op).await
+    }
+
+    /// Writes this host's current wall-clock time to the device's Current
+    /// Time Service, if it exposes one. `Ok(false)` (not an error) means an
+    /// older daemon without CTS support — callers can call this
+    /// unconditionally after connecting.
+    pub async fn set_time(&self, when: std::time::SystemTime) -> Result<bool, SdkError> {
+        let Some(characteristic) = self.current_time.as_ref() else {
+            return Ok(false);
+        };
+        let unix_secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| SdkError::Ble("system clock is before the Unix epoch".into()))?
+            .as_secs() as i64;
+        let bytes = netprov_protocol::encode_current_time(unix_secs);
+        self.peripheral
+            .write(characteristic, &bytes, WriteType::WithResponse)
+            .await?;
+        Ok(true)
     }
 
     /// Per-frame BLE value length for request writes.

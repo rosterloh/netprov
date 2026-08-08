@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- Further sandboxed `packaging/netprovd.service`: an empty
+  `CapabilityBoundingSet`/`AmbientCapabilities` (the daemon only proxies over
+  the NetworkManager and BlueZ D-Bus APIs, never opening a raw network or
+  Bluetooth socket itself), `RestrictAddressFamilies=AF_UNIX`,
+  `MemoryDenyWriteExecute`, `ProtectClock`, `ProtectHostname`,
+  `ProtectKernelLogs`, `ProtectProc=invisible`, `RestrictSUIDSGID`, and
+  `UMask=0077`. Also switched `Requires=`/`Restart=on-failure` to
+  `BindsTo=`/`Restart=always` so a clean stop or restart of
+  `NetworkManager.service`/`bluetooth.service` now brings `netprovd` back up
+  instead of leaving it down. (#24)
+
 ## [1.1.0] — 2026-08-01
 
 Post-release hardening pass over the BLE auth and transport path, found during

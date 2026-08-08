@@ -68,6 +68,10 @@ where
         // to dispatch to.
         #[cfg(feature = "ble")]
         Command::BleScan { .. } => bail!("ble-scan does not run over a connection"),
+        #[cfg(feature = "ble")]
+        Command::SetTime => {
+            bail!("set-time requires --ble-peer; the dev-tcp transport has no Current Time Service")
+        }
         Command::List => {
             let res = c.request(Op::ListInterfaces).await?;
             match res {

@@ -80,6 +80,12 @@ pub enum Command {
         #[arg(long, default_value_t = 8)]
         timeout: u64,
     },
+    /// Sync the device's clock to this host's current time via the Current
+    /// Time Service. Requires `--ble-peer`; older daemons without CTS
+    /// support answer with an explicit message rather than doing nothing
+    /// silently.
+    #[cfg(feature = "ble")]
+    SetTime,
     /// List network interfaces.
     List,
     /// Print IP config for an interface.

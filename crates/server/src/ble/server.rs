@@ -2,6 +2,7 @@
 
 use super::conn::{NotifyRx, NotifyTx, PeerSession};
 use super::gatt::{GattHandlers, build_application};
+use crate::clock::ClockFacade;
 use crate::facade::NetworkFacade;
 use crate::rate_limit::RateLimiter;
 use crate::session::AuthOutcome;
@@ -155,6 +156,7 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
     model: String,
     facade: Arc<F>,
     rate_limiter: Arc<RateLimiter>,
+    clock: Arc<dyn ClockFacade>,
 ) -> BuiltHandlers<F> {
     let current: PeerTable<F> = Arc::new(Default::default());
     let (notify_tx, notify_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
@@ -172,6 +174,8 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
     let model_auth = model;
     let notify_tx_nonce = notify_tx.clone();
     let notify_tx_auth = notify_tx.clone();
+    let cur_time = current.clone();
+    let clock_time = clock;
     let handlers = GattHandlers {
         // Stateless: Info is a constant payload per model, and minting a
         // session here is what made an unencrypted read a denial-of-service
@@ -221,6 +225,29 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
                 p.on_request(value);
             }
         }),
+        on_time_read: Arc::new(|_addr| {
+            netprov_protocol::encode_current_time(super::conn::now_unix_secs()).to_vec()
+        }),
+        on_time_write: Arc::new(move |addr, value| {
+            let peer_id = format!("{addr:?}");
+            let peer = {
+                let guard = cur_time.lock().unwrap();
+                match guard.as_ref() {
+                    Some((id, p)) if *id == peer_id => Some(p.clone()),
+                    _ => None,
+                }
+            };
+            let clock = clock_time.clone();
+            Box::pin(async move {
+                match peer {
+                    Some(peer) => peer.on_set_time(&value, clock.as_ref()).await,
+                    // No session at all for this peer is the same refusal as
+                    // an unauthenticated one that does have a session — both
+                    // mean "prove you hold the PSK first".
+                    None => Err(super::conn::TimeSetError::NotAuthenticated),
+                }
+            })
+        }),
     };
 
     (current, notify_tx, notify_rx, handlers)
@@ -229,6 +256,7 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
 pub async fn run_ble_server<F>(
     cfg: BleServerConfig,
     facade: Arc<F>,
+    clock: Arc<dyn ClockFacade>,
     rate_limiter: Arc<RateLimiter>,
     mut ready_cb: impl FnMut(),
 ) -> anyhow::Result<()>
@@ -272,8 +300,13 @@ where
     // subscribing (the SDK's normal flow) still finds live session state.
     let model = cfg.model.clone();
     let psk = cfg.psk;
-    let (current, notify_tx, mut notify_rx, handlers) =
-        build_gatt_handlers(psk, model.clone(), facade.clone(), rate_limiter.clone());
+    let (current, notify_tx, mut notify_rx, handlers) = build_gatt_handlers(
+        psk,
+        model.clone(),
+        facade.clone(),
+        rate_limiter.clone(),
+        clock.clone(),
+    );
 
     let built = build_application(handlers);
     let _app_handle = adapter.serve_gatt_application(built.app).await?;
@@ -419,6 +452,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock_mock::MockClock;
     use crate::facade_mock::MockFacade;
     use netprov_protocol::{
         MAX_FRAME_LEN, NONCE_LEN, Op, Request, auth_payload, client_tag, decode_response,
@@ -450,12 +484,14 @@ mod tests {
         let facade = Arc::new(MockFacade::new());
         let rate_limiter = Arc::new(RateLimiter::with_defaults());
         let addr = Address::new([1, 2, 3, 4, 5, 6]);
+        let clock = Arc::new(MockClock::new());
 
         let (current, notify_tx, mut notify_rx, handlers) = build_gatt_handlers(
             psk,
             "test-model".into(),
             facade.clone(),
             rate_limiter.clone(),
+            clock,
         );
 
         // 1. Read Info (unauthenticated, but this is also the SDK's first
@@ -549,8 +585,9 @@ mod tests {
         let psk = [0x42u8; 32];
         let facade = Arc::new(MockFacade::new());
         let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
         let (current, notify_tx, _notify_rx, _handlers) =
-            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone(), clock);
 
         let addr_a = Address::new([1, 2, 3, 4, 5, 6]);
         let addr_b = Address::new([10, 11, 12, 13, 14, 15]);
@@ -604,8 +641,9 @@ mod tests {
         let psk = [0x42u8; 32];
         let facade = Arc::new(MockFacade::new());
         let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
         let (current, _notify_tx, _notify_rx, handlers) =
-            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone(), clock);
 
         let operator = Address::new([1, 2, 3, 4, 5, 6]);
         let operator_id = format!("{operator:?}");
@@ -660,8 +698,9 @@ mod tests {
         let psk = [0x42u8; 32];
         let facade = Arc::new(MockFacade::new());
         let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
         let (current, notify_tx, _notify_rx, _handlers) =
-            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone());
+            build_gatt_handlers(psk, "m".into(), facade.clone(), rate_limiter.clone(), clock);
 
         let addr = Address::new([1, 2, 3, 4, 5, 6]);
         let id = format!("{addr:?}");
@@ -673,6 +712,55 @@ mod tests {
         assert!(
             current.lock().unwrap().is_none(),
             "ending the peer held in `current` must clear it"
+        );
+    }
+
+    /// Covers the `on_time_write` closure's address-matching, which the four
+    /// clock tests in `conn.rs` all bypass by calling `PeerSession::on_set_time`
+    /// directly: a peer that never authenticated (indeed, never touched this
+    /// session at all) must be refused even though *some* peer is currently
+    /// authenticated, and the clock must never be consulted for it.
+    #[tokio::test]
+    async fn on_time_write_refuses_a_peer_that_never_authenticated() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
+        let (_current, _notify_tx, _notify_rx, handlers) = build_gatt_handlers(
+            psk,
+            "m".into(),
+            facade.clone(),
+            rate_limiter.clone(),
+            clock.clone(),
+        );
+
+        let addr_a = Address::new([1, 2, 3, 4, 5, 6]);
+        let addr_b = Address::new([9, 9, 9, 9, 9, 9]);
+
+        // A authenticates.
+        let nonce = (handlers.on_nonce_read)(addr_a);
+        let mut n = [0u8; NONCE_LEN];
+        n.copy_from_slice(&nonce);
+        let client_nonce = [0x77u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
+        assert!(matches!(
+            (handlers.on_auth_write)(addr_a, payload.to_vec()),
+            AuthOutcome::Ok(_)
+        ));
+
+        // B, who never authenticated, writes a valid CTS value.
+        let value = netprov_protocol::encode_current_time(1_735_689_600).to_vec();
+        let result = (handlers.on_time_write)(addr_b, value).await;
+
+        assert_eq!(
+            result,
+            Err(crate::ble::conn::TimeSetError::NotAuthenticated),
+            "a peer with no session at all must be refused, same as an \
+             unauthenticated one"
+        );
+        assert!(
+            clock.last_set_unix_secs.lock().unwrap().is_none(),
+            "the clock must never be consulted for an unauthenticated write"
         );
     }
 }

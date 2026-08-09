@@ -34,7 +34,20 @@ async fn main() -> Result<()> {
             let mut client = BleClient::connect(&peer).await?;
             let result = async {
                 client.authenticate(psk).await?;
-                dispatch(&mut client, cli.command).await
+                match cli.command {
+                    netprov_client::cli::Command::SetTime => {
+                        let synced = client.set_time(std::time::SystemTime::now()).await?;
+                        if synced {
+                            println!("ok");
+                        } else {
+                            eprintln!(
+                                "device does not support the Current Time Service (older daemon)"
+                            );
+                        }
+                        Ok(())
+                    }
+                    other => dispatch(&mut client, other).await,
+                }
             }
             .await;
             // Always drop the link, including on failure. A peripheral that

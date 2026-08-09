@@ -18,3 +18,10 @@ pub const REQUEST_UUID: u128 = 0x6d29f399_aad4_494e_8b0b_b85b9a7fef9e;
 /// the BlueZ layer actually exposes the endpoint: one characteristic, two
 /// flows. Clients subscribe to notifications on REQUEST_UUID.
 pub const RESPONSE_UUID: u128 = REQUEST_UUID;
+
+/// Bluetooth SIG-assigned Current Time Service and Current Time
+/// characteristic UUIDs (0x1805 / 0x2A2B) — not netprov-minted, so reusing
+/// them carries none of the "changing a UUID is a breaking change" concern
+/// above; they're fixed by the Bluetooth SIG.
+pub const CTS_SERVICE_UUID: u128 = 0x00001805_0000_1000_8000_00805f9b34fb;
+pub const CURRENT_TIME_UUID: u128 = 0x00002a2b_0000_1000_8000_00805f9b34fb;

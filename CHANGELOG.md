@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- `netprovd` exposes the standard Bluetooth SIG Current Time Service
+  (0x1805/0x2A2B), so an already-authenticated client can set a clockless
+  device's system clock (and, via `timedated`, its RTC). Reads are
+  unauthenticated; writes require an authenticated session and are clamped to
+  a plausible window. `netprov-sdk`'s `BleClient::set_time` and the desktop
+  app's automatic post-auth sync make this transparent; `netprov set-time`
+  exposes it from the CLI. (#32)
+
 ### Security
 
 - Further sandboxed `packaging/netprovd.service`: an empty

@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "netprov-app"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "dioxus",
  "netprov-protocol",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "netprov-client"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "netprov-protocol"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "ciborium",
  "hmac",
@@ -3314,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "netprov-sdk"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "async-trait",
  "bluer",
@@ -3329,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "netprov-server"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "async-trait",

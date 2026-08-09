@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-08-09
+
 ### Added
 
 - `netprovd` exposes the standard Bluetooth SIG Current Time Service
@@ -15,6 +17,15 @@ All notable changes to this project are documented in this file. Format follows
   a plausible window. `netprov-sdk`'s `BleClient::set_time` and the desktop
   app's automatic post-auth sync make this transparent; `netprov set-time`
   exposes it from the CLI. (#32)
+
+### Fixed
+
+- `connect_wifi` no longer accumulates duplicate `802-11-wireless` profiles
+  when retrying a mistyped password: an existing profile for the SSID is now
+  looked up and updated/reactivated instead of always calling
+  `AddAndActivateConnection`. It also polls the resulting `ActiveConnection`'s
+  state until activated/deactivated, so a bad passphrase surfaces as an error
+  instead of a premature success. (#46)
 
 ### Security
 
@@ -256,6 +267,7 @@ The v1 release deliberately excludes:
 - Running as a non-root user with `CAP_NET_ADMIN` + polkit.
 - Split `netprov` / `netprovd` packages.
 
-[Unreleased]: https://github.com/rosterloh/netprov/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/rosterloh/netprov/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/rosterloh/netprov/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rosterloh/netprov/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rosterloh/netprov/releases/tag/v1.0.0

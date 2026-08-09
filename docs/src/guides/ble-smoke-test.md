@@ -6,7 +6,7 @@ be Linux or macOS and also needs a BLE adapter.
 ## Server
 
 ```bash
-sudo dpkg -i netprov_1.1.0-1_arm64.deb
+sudo dpkg -i netprov_1.1.1-1_arm64.deb
 sudo netprovd keygen --install | tee /tmp/key.txt
 # Copy the base64 PSK output to the client.
 sudo systemctl enable --now netprovd

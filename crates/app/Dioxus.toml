@@ -1,0 +1,6 @@
+[bundle]
+# Without this, `dx` derives `com.example.NetprovApp`. macOS keys per-app
+# Bluetooth consent and the Application Support directory by bundle id, so
+# changing it re-prompts for Bluetooth and orphans any previously stored
+# `connection.conf` (see `src/settings.rs`, which must match this value).
+identifier = "com.rosterloh.NetprovApp"

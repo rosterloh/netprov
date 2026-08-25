@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 mod app;
 mod dashboard;
 mod operations;
+mod settings;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 

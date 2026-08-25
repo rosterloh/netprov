@@ -6,6 +6,40 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- The desktop app scans for devices on startup, so the device list is populated
+  without any action and "Scan again" reads as a repeat rather than the only way
+  to get a list at all.
+- The desktop app remembers the "Advanced connection" values (peer identifier
+  and PSK path) between runs, restoring them on the next launch. They are stored
+  only after a *successful* connection, so a typo never becomes the new default.
+  On macOS the file is
+  `~/Library/Application Support/com.rosterloh.NetprovApp/connection.conf`;
+  elsewhere `$XDG_CONFIG_HOME/netprov/connection.conf`, falling back to
+  `~/.config/netprov/connection.conf`. It records the *path* to the PSK, never
+  key bytes, so it is not a secret. Writes are best-effort: an unwritable home
+  means the values are not remembered, not that connecting fails.
+- The desktop app accepts `--key-path <PATH>` (short `-k`, matching the
+  `netprov` CLI) to override the PSK path. Resolution order is the flag, then
+  the stored value, then `/etc/netprov/key`.
+
+### Changed
+
+- The desktop app's bundle identifier is now `com.rosterloh.NetprovApp` via a
+  new `crates/app/Dioxus.toml`, replacing the `com.example.NetprovApp` that
+  `dx` derives by default. macOS keys per-app Bluetooth consent and the
+  Application Support directory by bundle id, so upgrading re-prompts for
+  Bluetooth permission once and orphans any `connection.conf` written under the
+  old identifier.
+
+### Documentation
+
+- `docs/src/guides/desktop-app.md` now points at `dx serve` rather than
+  `cargo run -p netprov-app --features desktop`. A plain Cargo binary does not
+  resolve `asset!()` paths, so it starts with no stylesheet at all; only `dx`
+  (or the bundle it produces) renders the app as intended.
+
 ## [1.1.1] — 2026-08-09
 
 ### Added

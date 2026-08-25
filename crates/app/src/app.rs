@@ -5,6 +5,7 @@ use crate::{
         DeviceSnapshot, DeviceSummary, SharedClient, connect_device, disconnect_device,
         scan_ble_devices,
     },
+    settings,
 };
 use dioxus::prelude::*;
 use netprov_sdk::PEER_ID_HINT;
@@ -121,6 +122,31 @@ fn allow_window_close(window: &dioxus::desktop::DesktopContext) {
     window.close();
 }
 
+/// Shared by the "Scan again" button and the mount-time scan, so both honour
+/// the same `discovery_operation_allowed` gate.
+fn begin_scan(
+    lifecycle: Signal<ConnectionLifecycle>,
+    mut scan_state: Signal<ScanState>,
+    mut devices: Signal<Vec<DeviceSummary>>,
+    mut selected_device: Signal<Option<DeviceSummary>>,
+) {
+    if !discovery_operation_allowed(&lifecycle(), &scan_state()) {
+        return;
+    }
+    scan_state.set(ScanState::Scanning);
+    devices.set(Vec::new());
+    selected_device.set(None);
+    spawn(async move {
+        match scan_ble_devices().await {
+            Ok(found) => {
+                devices.set(found);
+                scan_state.set(ScanState::Complete);
+            }
+            Err(err) => scan_state.set(ScanState::Failed(err)),
+        }
+    });
+}
+
 fn begin_disconnect(
     mut lifecycle: Signal<ConnectionLifecycle>,
     mut client: Signal<Option<SharedClient>>,
@@ -156,10 +182,11 @@ fn begin_disconnect(
 
 #[component]
 pub(crate) fn App() -> Element {
-    let mut peer = use_signal(String::new);
-    let mut key_path = use_signal(|| "/etc/netprov/key".to_string());
-    let mut scan_state = use_signal(|| ScanState::Idle);
-    let mut devices = use_signal(Vec::<DeviceSummary>::new);
+    let stored = use_hook(settings::load);
+    let mut peer = use_signal(|| stored.peer.clone());
+    let mut key_path = use_signal(|| stored.key_path.clone());
+    let scan_state = use_signal(|| ScanState::Idle);
+    let devices = use_signal(Vec::<DeviceSummary>::new);
     let mut client = use_signal(|| None::<SharedClient>);
     let mut snapshot = use_signal(|| None::<DeviceSnapshot>);
     let mut selected_device = use_signal(|| None::<DeviceSummary>);
@@ -278,23 +305,11 @@ pub(crate) fn App() -> Element {
         .map(|target| target.detail.clone())
         .unwrap_or_default();
 
-    let scan = move |_| {
-        if !discovery_operation_allowed(&lifecycle(), &scan_state()) {
-            return;
-        }
-        scan_state.set(ScanState::Scanning);
-        devices.set(Vec::new());
-        selected_device.set(None);
-        spawn(async move {
-            match scan_ble_devices().await {
-                Ok(found) => {
-                    devices.set(found);
-                    scan_state.set(ScanState::Complete);
-                }
-                Err(err) => scan_state.set(ScanState::Failed(err)),
-            }
-        });
-    };
+    let scan = move |_| begin_scan(lifecycle, scan_state, devices, selected_device);
+
+    // Scan once on mount: the first thing a user wants is the device list, and
+    // "Scan again" only reads as "again" if a scan already happened.
+    use_future(move || async move { begin_scan(lifecycle, scan_state, devices, selected_device) });
 
     let connect_window = window.clone();
     let connect = move |_| {
@@ -311,9 +326,13 @@ pub(crate) fn App() -> Element {
             ));
         });
         let connect_window = connect_window.clone();
+        // Persisted only on success, so a typo is never what greets the next
+        // launch.
+        let reusable = (peer_value.clone(), key_path_value.clone());
         spawn(async move {
             match connect_device(peer_value, key_path_value).await {
                 Ok((next_client, next_snapshot)) => {
+                    settings::save(&reusable.0, &reusable.1);
                     snapshot.set(Some(next_snapshot));
                     client.set(Some(next_client));
                     lifecycle.with_mut(ConnectionLifecycle::connect_succeeded);
@@ -374,7 +393,11 @@ pub(crate) fn App() -> Element {
                             r#type: "button",
                             disabled: !discovery_enabled || is_scanning,
                             onclick: scan,
-                            "Scan again"
+                            if is_scanning {
+                                "Scanning…"
+                            } else {
+                                "Scan again"
+                            }
                         }
                     }
 
@@ -465,7 +488,7 @@ fn ScanStatus(state: ScanState, count: usize) -> Element {
             span { role: "status", "Scanning for nearby Netprov devices…" }
         },
         ScanState::Complete => rsx! {
-            span { role: "status", "{count} devices found" }
+            span { role: "status", "{count} device(s) found" }
         },
         ScanState::Failed(ref message) => rsx! {
             span { role: "status", "Scan failed: {message}" }

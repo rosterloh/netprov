@@ -25,6 +25,21 @@ pub(crate) fn random_nonce() -> Nonce {
 /// leaves the CLI and app blocked forever.
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// Deadline for the Current Time Service write.
+///
+/// Much shorter than `CLIENT_TIMEOUT` because this is one ATT write, it is
+/// best-effort, and it sits on the connect path: the desktop app calls it
+/// between authenticating and showing the dashboard, so every second spent
+/// here is a second the user stares at "Connecting securely…".
+///
+/// It needs a bound at all because the peer can accept the write and then
+/// never answer it. `netprovd`'s handler awaits `timedated`'s `SetTime` inside
+/// the GATT write closure, and that call is gated by polkit — on a headless
+/// device with no authentication agent it can block for as long as it likes,
+/// so the ATT response never comes. Measured against a real Raspberry Pi 5:
+/// `netprov set-time` sat there for 102 s without returning.
+pub const SET_TIME_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     #[error(transparent)]

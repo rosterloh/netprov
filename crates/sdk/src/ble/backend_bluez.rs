@@ -4,7 +4,7 @@
 //! by BD_ADDR, so [`PeerId`] round-trips through `bluer::Address`.
 
 use super::{BleDevice, PeerId, resolve_max_fragment};
-use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError, random_nonce};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SET_TIME_TIMEOUT, SdkError, random_nonce};
 use async_trait::async_trait;
 use bluer::{
     Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport,
@@ -203,6 +203,10 @@ impl BleClient {
     /// Time Service, if it exposes one. `Ok(false)` (not an error) means an
     /// older daemon without CTS support — callers can call this
     /// unconditionally after connecting.
+    ///
+    /// Bounded by `SET_TIME_TIMEOUT`, for the same reason as the btleplug
+    /// backend: a peer can accept the write and never answer it, and callers
+    /// discard the error, so an unbounded wait reads as a hung app.
     pub async fn set_time(&self, when: std::time::SystemTime) -> Result<bool, SdkError> {
         let Some(characteristic) = self.current_time.as_ref() else {
             return Ok(false);
@@ -212,7 +216,9 @@ impl BleClient {
             .map_err(|_| SdkError::Ble("system clock is before the Unix epoch".into()))?
             .as_secs() as i64;
         let bytes = netprov_protocol::encode_current_time(unix_secs);
-        characteristic.write(&bytes).await?;
+        tokio::time::timeout(SET_TIME_TIMEOUT, characteristic.write(&bytes))
+            .await
+            .map_err(|_| SdkError::Timeout(SET_TIME_TIMEOUT))??;
         Ok(true)
     }
 

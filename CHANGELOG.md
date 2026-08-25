@@ -33,6 +33,25 @@ All notable changes to this project are documented in this file. Format follows
   Bluetooth permission once and orphans any `connection.conf` written under the
   old identifier.
 
+### Fixed
+
+- `BleClient::set_time` is now bounded by a 5 s deadline in both BLE backends.
+  It was the one unbounded await left on the connect path, so a peer that
+  accepted the Current Time write and never answered it hung the caller
+  forever: the desktop app sat on "Connecting securely…" with no timeout, no
+  error and no way out but force-quit, because `connect_device` calls
+  `set_time` between authenticating and loading the snapshot and discards its
+  result. `netprov set-time` against a real Raspberry Pi 5 reproduced it at
+  102 s and counting, while `netprov list` — which never calls `set_time` —
+  worked against the same device, which is what isolated it.
+- `netprovd`'s `timedated` `SetTime` call is bounded by the same 5 s deadline.
+  It runs inside the CurrentTime GATT write closure, and `SetTime` is
+  polkit-gated: on a headless device with no authentication agent the call can
+  block instead of being denied, so BlueZ never sends the ATT write response.
+  That is the peer-side half of the hang above, and it needs a redeployed
+  `netprovd` to take effect. The timeout error names polkit, since that is the
+  likely cause and it is otherwise invisible.
+
 ### Documentation
 
 - `docs/src/guides/desktop-app.md` now points at `dx serve` rather than

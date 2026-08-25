@@ -5,6 +5,17 @@
 
 use crate::clock::{ClockError, ClockFacade};
 use async_trait::async_trait;
+use std::time::Duration;
+
+/// Bound on the `SetTime` call.
+///
+/// `SetTime` is polkit-gated, and on a headless device there is no
+/// authentication agent to answer, so the call can block indefinitely rather
+/// than being denied. This runs inside the CurrentTime GATT write closure, so
+/// blocking here means BlueZ never sends the ATT write response and the client
+/// waits forever on a write it will never hear about. A local D-Bus round trip
+/// to `timedated` is sub-second when it works at all.
+const SET_TIME_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct TimedateFacade {
     zbus: zbus::Connection,
@@ -33,9 +44,18 @@ impl ClockFacade for TimedateFacade {
         .await
         .map_err(|e| ClockError(e.to_string()))?;
         let usec_utc = unix_secs.saturating_mul(1_000_000);
-        proxy
-            .call::<_, _, ()>("SetTime", &(usec_utc, false, false))
-            .await
-            .map_err(|e| ClockError(e.to_string()))
+        tokio::time::timeout(
+            SET_TIME_TIMEOUT,
+            proxy.call::<_, _, ()>("SetTime", &(usec_utc, false, false)),
+        )
+        .await
+        .map_err(|_| {
+            ClockError(format!(
+                "timedated SetTime did not answer within {}s (polkit may be waiting for an \
+                 authentication agent)",
+                SET_TIME_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| ClockError(e.to_string()))
     }
 }

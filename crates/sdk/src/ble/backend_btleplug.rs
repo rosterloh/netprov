@@ -21,7 +21,7 @@
 //!    [`super::MAX_FRAGMENT_ENV`] says otherwise.
 
 use super::{ATT_HEADER_LEN, BleDevice, PeerId, resolve_max_fragment};
-use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SdkError, random_nonce};
+use crate::ops::{CLIENT_TIMEOUT, ProvisioningClient, SET_TIME_TIMEOUT, SdkError, random_nonce};
 use async_trait::async_trait;
 use btleplug::api::{
     BDAddr, Central, CharPropFlags, Characteristic, Manager as _, Peripheral as _, ScanFilter,
@@ -194,6 +194,11 @@ impl BleClient {
     /// Time Service, if it exposes one. `Ok(false)` (not an error) means an
     /// older daemon without CTS support — callers can call this
     /// unconditionally after connecting.
+    ///
+    /// Bounded by `SET_TIME_TIMEOUT`: a peer that accepts the write and never
+    /// answers it must not hang the caller. Callers treat this as best-effort
+    /// and discard the error, so an unbounded wait here is indistinguishable
+    /// from a dead app.
     pub async fn set_time(&self, when: std::time::SystemTime) -> Result<bool, SdkError> {
         let Some(characteristic) = self.current_time.as_ref() else {
             return Ok(false);
@@ -203,9 +208,13 @@ impl BleClient {
             .map_err(|_| SdkError::Ble("system clock is before the Unix epoch".into()))?
             .as_secs() as i64;
         let bytes = netprov_protocol::encode_current_time(unix_secs);
-        self.peripheral
-            .write(characteristic, &bytes, WriteType::WithResponse)
-            .await?;
+        tokio::time::timeout(
+            SET_TIME_TIMEOUT,
+            self.peripheral
+                .write(characteristic, &bytes, WriteType::WithResponse),
+        )
+        .await
+        .map_err(|_| SdkError::Timeout(SET_TIME_TIMEOUT))??;
         Ok(true)
     }
 

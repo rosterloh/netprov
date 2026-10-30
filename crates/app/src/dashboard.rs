@@ -361,7 +361,10 @@ pub(crate) fn Dashboard(
 
     rsx! {
         section { id: "workspace-view",
-        div { inert: confirm_ip_view || disconnecting,
+        // `inert` is not in the interpreter's boolean-attribute list, so a
+        // `false` would still be written as `inert="false"`, which makes the
+        // element inert. Omit the attribute instead.
+        div { inert: if confirm_ip_view || disconnecting { "true" },
         header { class: "device-header",
             div {
                 p { class: "eyebrow", "Connected device" }
@@ -953,6 +956,70 @@ mod tests {
         assert_eq!(
             adjacent_tab(ActiveTab::Interfaces, TabDirection::Next),
             ActiveTab::Overview
+        );
+    }
+
+    /// The `inert` value the workspace wrapper is created with, as written to
+    /// the webview.
+    fn rendered_inert(disconnecting: bool) -> Vec<dioxus::dioxus_core::AttributeValue> {
+        use dioxus::dioxus_core::Mutation;
+        use netprov_protocol::WifiStatus;
+
+        #[component]
+        fn Root(disconnecting: bool) -> Element {
+            let client = use_signal(|| None::<SharedClient>);
+            let snapshot = use_signal(|| {
+                Some(DeviceSnapshot {
+                    interfaces: Vec::new(),
+                    wifi_status: WifiStatus {
+                        ssid: None,
+                        signal: None,
+                        security: None,
+                    },
+                })
+            });
+            rsx! {
+                Dashboard {
+                    client,
+                    snapshot,
+                    device_name: "device",
+                    device_detail: "peer",
+                    disconnecting,
+                    connection_error: None,
+                    ondisconnect: |_| {},
+                }
+            }
+        }
+
+        VirtualDom::new_with_props(Root, RootProps { disconnecting })
+            .rebuild_to_vec()
+            .edits
+            .into_iter()
+            .filter_map(|edit| match edit {
+                Mutation::SetAttribute {
+                    name: "inert",
+                    value,
+                    ..
+                } => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn workspace_is_only_inert_while_blocked() {
+        use dioxus::dioxus_core::AttributeValue;
+
+        // Any value, even "false", makes a boolean attribute true in the DOM.
+        assert!(
+            rendered_inert(false)
+                .iter()
+                .all(|value| *value == AttributeValue::None)
+        );
+        assert!(
+            rendered_inert(true)
+                .iter()
+                .any(|value| *value != AttributeValue::None)
         );
     }
 

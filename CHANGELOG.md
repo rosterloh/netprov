@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The desktop app's connected-device workspace is no longer permanently inert.
+  The "block input while confirming or disconnecting" flag was written as
+  `inert="false"`, which the webview treats as inert, so tabs, forms and the
+  Disconnect button ignored clicks and keyboard focus.
+
+
 ## [1.1.2] — 2026-10-30
 
 ### Added

@@ -14,6 +14,13 @@ All notable changes to this project are documented in this file. Format follows
   could run provisioning operations — Wi-Fi credentials, static IP, DHCP —
   under another peer's authenticated session.
 
+### Fixed
+
+- The BLE client (CLI and desktop app) no longer gets stuck one reply behind
+  after a request times out. A late reply to the timed-out request used to be
+  read as the answer to the next one and rejected as an id mismatch, which then
+  repeated for every later request on that connection; it is now discarded.
+
 ## [1.1.2] — 2026-10-30
 
 ### Added

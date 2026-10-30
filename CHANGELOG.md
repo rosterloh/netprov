@@ -24,6 +24,14 @@ All notable changes to this project are documented in this file. Format follows
   static IP) now includes time spent queued behind another write, so a queued
   write answers with a timeout before the client's 35-second deadline instead
   of replying after the client has given up.
+- The desktop app's connected-device workspace is no longer permanently inert.
+  The "block input while confirming or disconnecting" flag was written as
+  `inert="false"`, which the webview treats as inert, so tabs, forms and the
+  Disconnect button ignored clicks and keyboard focus.
+- Desktop app accessibility: the device-scan status is one live region whose
+  text changes (so screen readers announce each scan result), the device,
+  Wi-Fi and interface lists are labelled groups, and the IPv4 confirmation
+  dialog moves focus to "Cancel" every time it opens, not only the first time.
 
 ## [1.1.2] — 2026-10-30
 

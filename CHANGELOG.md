@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- `netprovd` now dispatches a Request write only when it comes from the peer
+  that owns the current session. Previously the write handler ignored the
+  writer's address, so a second central that could pair (Just Works, no PSK)
+  could run provisioning operations — Wi-Fi credentials, static IP, DHCP —
+  under another peer's authenticated session.
+
 ## [1.1.2] — 2026-10-30
 
 ### Added

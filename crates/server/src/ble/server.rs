@@ -220,9 +220,15 @@ fn build_gatt_handlers<F: NetworkFacade + 'static>(
                 _ => None,
             }
         }),
-        on_request_write: Arc::new(move |value| {
-            if let Some((_, p)) = cur_req.lock().unwrap().as_ref() {
-                p.on_request(value);
+        // Only the peer that owns the session may drive it. Without the
+        // address check any other central that can pair (Just Works, no PSK)
+        // could write requests that run under the operator's authenticated
+        // session.
+        on_request_write: Arc::new(move |addr, value| {
+            let peer_id = format!("{addr:?}");
+            match cur_req.lock().unwrap().as_ref() {
+                Some((id, p)) if *id == peer_id => p.on_request(value),
+                _ => warn!(peer = %peer_id, "dropping request frame from a peer with no session"),
             }
         }),
         on_time_read: Arc::new(|_addr| {
@@ -550,7 +556,7 @@ mod tests {
         };
         let bytes = encode_request(&req).unwrap();
         for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
-            (handlers.on_request_write)(f);
+            (handlers.on_request_write)(addr, f);
         }
 
         let mut reassembler =
@@ -689,6 +695,49 @@ mod tests {
             AuthOutcome::BadTag
         );
         still_ours();
+    }
+
+    /// A second central must not be able to drive the operator's
+    /// authenticated session by writing to the Request characteristic: the
+    /// write carries the stranger's address and must be dropped, not
+    /// dispatched under the session that happens to be current.
+    #[tokio::test]
+    async fn stranger_request_write_is_not_dispatched() {
+        let psk = [0x42u8; 32];
+        let facade = Arc::new(MockFacade::new());
+        let rate_limiter = Arc::new(RateLimiter::with_defaults());
+        let clock = Arc::new(MockClock::new());
+        let (_current, _notify_tx, mut notify_rx, handlers) =
+            build_gatt_handlers(psk, "m".into(), facade, rate_limiter, clock);
+
+        let operator = Address::new([1, 2, 3, 4, 5, 6]);
+        let stranger = Address::new([9, 9, 9, 9, 9, 9]);
+
+        let nonce = (handlers.on_nonce_read)(operator);
+        let mut n = [0u8; NONCE_LEN];
+        n.copy_from_slice(&nonce);
+        let client_nonce = [0x55u8; NONCE_LEN];
+        let payload = auth_payload(&client_nonce, &client_tag(&psk, &n, &client_nonce));
+        assert!(matches!(
+            (handlers.on_auth_write)(operator, payload.to_vec()),
+            AuthOutcome::Ok(_)
+        ));
+
+        let req = Request {
+            request_id: 66,
+            op: Op::ListInterfaces,
+        };
+        let bytes = encode_request(&req).unwrap();
+        for f in fragment(req.request_id, &bytes, MAX_FRAME_LEN) {
+            (handlers.on_request_write)(stranger, f);
+        }
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), notify_rx.recv())
+                .await
+                .is_err(),
+            "a stranger's request must not be served from the operator's session"
+        );
     }
 
     /// Ending the peer that `current` still points at clears the table, so the

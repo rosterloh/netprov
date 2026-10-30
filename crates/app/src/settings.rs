@@ -16,6 +16,7 @@ const DEFAULT_KEY_PATH: &str = "/etc/netprov/key";
 
 /// Must match `[bundle] identifier` in `Dioxus.toml` — macOS keys the support
 /// directory by bundle id, and a mismatch would silently orphan the file.
+#[cfg(target_os = "macos")]
 const APP_ID: &str = "com.rosterloh.NetprovApp";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

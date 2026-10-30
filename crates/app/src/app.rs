@@ -478,21 +478,22 @@ pub(crate) fn App() -> Element {
     }
 }
 
+fn scan_status_message(state: &ScanState, count: usize) -> String {
+    match state {
+        ScanState::Idle => "Ready to scan for nearby Netprov devices.".into(),
+        ScanState::Scanning => "Scanning for nearby Netprov devices…".into(),
+        ScanState::Complete => format!("{count} device(s) found"),
+        ScanState::Failed(message) => format!("Scan failed: {message}"),
+    }
+}
+
+/// One persistent live region whose text changes: a fresh `role="status"`
+/// node per state is often not announced by screen readers.
 #[component]
 fn ScanStatus(state: ScanState, count: usize) -> Element {
-    match state {
-        ScanState::Idle => rsx! {
-            span { role: "status", "Ready to scan for nearby Netprov devices." }
-        },
-        ScanState::Scanning => rsx! {
-            span { role: "status", "Scanning for nearby Netprov devices…" }
-        },
-        ScanState::Complete => rsx! {
-            span { role: "status", "{count} device(s) found" }
-        },
-        ScanState::Failed(ref message) => rsx! {
-            span { role: "status", "Scan failed: {message}" }
-        },
+    let message = scan_status_message(&state, count);
+    rsx! {
+        span { role: "status", "{message}" }
     }
 }
 
@@ -504,7 +505,7 @@ fn DeviceList(
     onselect: EventHandler<DeviceSummary>,
 ) -> Element {
     rsx! {
-        div { class: "device-list", aria_label: "Nearby devices",
+        div { class: "device-list", role: "group", aria_label: "Nearby devices",
             if devices.is_empty() {
                 p { class: "muted", "Scan to discover nearby Netprov devices." }
             }
@@ -550,6 +551,22 @@ mod tests {
         assert_eq!(target_window_height(720.0, 1_080.0), 720.0);
         assert_eq!(target_window_height(520.0, 1_080.0), 600.0);
         assert_eq!(target_window_height(1_200.0, 1_080.0), 1_000.0);
+    }
+
+    #[test]
+    fn scan_status_message_covers_every_state() {
+        assert_eq!(
+            scan_status_message(&ScanState::Idle, 0),
+            "Ready to scan for nearby Netprov devices."
+        );
+        assert_eq!(
+            scan_status_message(&ScanState::Complete, 2),
+            "2 device(s) found"
+        );
+        assert_eq!(
+            scan_status_message(&ScanState::Failed("adapter off".into()), 0),
+            "Scan failed: adapter off"
+        );
     }
 
     #[test]

@@ -17,14 +17,14 @@ authors = ["Richard Osterloh <richard.osterloh@gmail.com>"]
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 bluer = { version = "0.17.4", features = ["bluetoothd", "l2cap"] }
 btleplug = "0.12.0"
 ciborium = "0.2.2"
 clap = { version = "4.6.4", features = ["derive"] }
-futures-util = "0.3.33"
+futures-util = "0.3.34"
 hmac = "0.12.1"
-ipnet = "2.12.0"
+ipnet = "2.12.2"
 proptest = "1.11.0"
 rand = "0.10.2"
 sd-notify = "0.5.0"
@@ -46,7 +46,7 @@ tokio-util = { version = "0.7.19", features = ["codec"] }
 tracing = "0.1.44"
 tracing-journald = "0.3.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
-uuid = "1.22.0"
+uuid = "1.26.0"
 
 [profile.release]
 lto = "thin"

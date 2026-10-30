@@ -26,6 +26,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ### Changed
 
+- The minimum supported Rust version is now 1.98.1 (was 1.94.1), matching the
+  Rust shipped by Yocto blacksail. The pinned toolchain moves to 1.98.1 too.
 - The desktop app's bundle identifier is now `com.rosterloh.NetprovApp` via a
   new `crates/app/Dioxus.toml`, replacing the `com.example.NetprovApp` that
   `dx` derives by default. macOS keys per-app Bluetooth consent and the

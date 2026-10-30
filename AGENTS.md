@@ -6,7 +6,7 @@ Guidance for AI agents (and humans) working in this repository.
 
 `netprov` is a BLE GATT service for provisioning network settings on headless
 Linux devices, plus a client SDK and desktop app. Rust workspace, edition 2024,
-MSRV **1.94.1**.
+MSRV **1.98.1**.
 
 ### Crates
 

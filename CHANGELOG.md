@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-10-30
+
 ### Added
 
 - The desktop app scans for devices on startup, so the device list is populated
@@ -53,6 +55,12 @@ All notable changes to this project are documented in this file. Format follows
   That is the peer-side half of the hang above, and it needs a redeployed
   `netprovd` to take effect. The timeout error names polkit, since that is the
   likely cause and it is otherwise invisible.
+
+### Security
+
+- The desktop app's lockfile moves `rustls` to 0.23.46 and `rustls-webpki` to
+  0.103.16, clearing RUSTSEC-2026-0285, -0346, -0348, -0349 and -0382. Neither
+  `netprovd` nor the `netprov` CLI depends on rustls.
 
 ### Documentation
 
@@ -322,7 +330,8 @@ The v1 release deliberately excludes:
 - Running as a non-root user with `CAP_NET_ADMIN` + polkit.
 - Split `netprov` / `netprovd` packages.
 
-[Unreleased]: https://github.com/rosterloh/netprov/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/rosterloh/netprov/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/rosterloh/netprov/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/rosterloh/netprov/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/rosterloh/netprov/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rosterloh/netprov/releases/tag/v1.0.0

@@ -45,6 +45,10 @@ plus `HMAC(PSK, "client" || Ns || Nc)`. After verifying it, the server returns
 any request, including Wi-Fi credentials. Domain separation prevents either
 tag from being replayed as the other.
 
+An authenticated session belongs to the peer address that completed the
+handshake. Request writes from any other central are dropped, so pairing with
+the device is not enough to drive someone else's session.
+
 An active MITM can observe the pre-authentication exchange during Just Works
 pairing, including the public challenge nonce, but cannot issue commands or
 impersonate a device without the PSK.

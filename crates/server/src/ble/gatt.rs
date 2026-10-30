@@ -29,7 +29,7 @@ pub struct GattHandlers {
     /// Serves the server's auth tag. `None` until this peer's own tag has
     /// verified.
     pub on_auth_read: Arc<dyn Fn(Address) -> Option<Vec<u8>> + Send + Sync>,
-    pub on_request_write: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
+    pub on_request_write: Arc<dyn Fn(Address, Vec<u8>) + Send + Sync>,
     /// CurrentTime read — unauthenticated, stateless (mirrors `on_info_read`).
     pub on_time_read: Arc<dyn Fn(Address) -> Vec<u8> + Send + Sync>,
     /// CurrentTime write — async because it may call out to `ClockFacade`
@@ -163,8 +163,8 @@ pub fn build_application(h: GattHandlers) -> BuiltApp {
                             write: true,
                             write_without_response: true,
                             encrypt_write: true,
-                            method: CharacteristicWriteMethod::Fun(Box::new(move |value, _req| {
-                                (request_write)(value);
+                            method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
+                                (request_write)(req.device_address, value);
                                 Box::pin(async move { Ok(()) })
                             })),
                             ..Default::default()
@@ -256,7 +256,7 @@ mod tests {
             on_nonce_read: Arc::new(|_| Vec::new()),
             on_auth_write: Arc::new(|_, _| AuthOutcome::Ok([0u8; 32])),
             on_auth_read: Arc::new(|_| None),
-            on_request_write: Arc::new(|_| {}),
+            on_request_write: Arc::new(|_, _| {}),
             on_time_read: Arc::new(|_| Vec::new()),
             on_time_write: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         };

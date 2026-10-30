@@ -353,11 +353,10 @@ where
         let parsed = parse_frame(&notification.value)?;
         if let Some(msg) = reassembler.push(parsed)? {
             let resp: Response = decode_response(&msg)?;
+            // A late reply to an earlier request that timed out. Skip it:
+            // failing here would leave every later request one reply behind.
             if resp.request_id != request_id {
-                return Err(SdkError::IdMismatch {
-                    expected: request_id,
-                    got: resp.request_id,
-                });
+                continue;
             }
             return resp.result.map_err(Into::into);
         }
@@ -644,18 +643,18 @@ mod tests {
         ));
     }
 
+    /// A late reply to a request that already timed out must be skipped,
+    /// not reported as an error: otherwise every later request reads the
+    /// previous request's reply and the session never recovers.
     #[tokio::test]
-    async fn mismatched_request_id_is_rejected() {
-        let body = interfaces_response(9);
-        let frames = fragment(9, &body, 512);
-        let mut stream = futures_util::stream::iter(frames.into_iter().map(notification)).boxed();
-        let err = read_response(&mut stream, 8).await.unwrap_err();
+    async fn stale_response_is_skipped() {
+        let frames = fragment(8, &interfaces_response(8), 512)
+            .into_iter()
+            .chain(fragment(9, &interfaces_response(9), 512));
+        let mut stream = futures_util::stream::iter(frames.map(notification)).boxed();
         assert!(matches!(
-            err,
-            SdkError::IdMismatch {
-                expected: 8,
-                got: 9
-            }
+            read_response(&mut stream, 9).await.unwrap(),
+            OpResult::Interfaces(_)
         ));
     }
 

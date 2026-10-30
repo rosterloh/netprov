@@ -513,8 +513,10 @@ impl NetworkFacade for NmrsFacade {
     }
 
     async fn set_dhcp(&self, iface: &str) -> Result<(), NetError> {
-        let _guard = self.write_guard.lock().await;
         tokio::time::timeout(OP_TIMEOUT, async {
+            // Inside the timeout: waiting behind another write counts against
+            // OP_TIMEOUT, so the reply still lands before the client gives up.
+            let _guard = self.write_guard.lock().await;
             let settings_path = get_settings_connection_for_iface(&self.zbus, iface).await?;
             let settings = zbus::Proxy::new(
                 &self.zbus,
@@ -569,8 +571,10 @@ impl NetworkFacade for NmrsFacade {
     }
 
     async fn set_static_ipv4(&self, iface: &str, cfg: StaticIpv4) -> Result<(), NetError> {
-        let _guard = self.write_guard.lock().await;
         tokio::time::timeout(OP_TIMEOUT, async {
+            // Inside the timeout: waiting behind another write counts against
+            // OP_TIMEOUT, so the reply still lands before the client gives up.
+            let _guard = self.write_guard.lock().await;
             let settings_path = get_settings_connection_for_iface(&self.zbus, iface).await?;
             let settings = zbus::Proxy::new(
                 &self.zbus,
@@ -662,8 +666,10 @@ impl NetworkFacade for NmrsFacade {
     }
 
     async fn connect_wifi(&self, ssid: &str, cred: WifiCredential) -> Result<(), NetError> {
-        let _guard = self.write_guard.lock().await;
         tokio::time::timeout(OP_TIMEOUT, async {
+            // Inside the timeout: waiting behind another write counts against
+            // OP_TIMEOUT, so the reply still lands before the client gives up.
+            let _guard = self.write_guard.lock().await;
             let wifi_path = find_wifi_device_path(&self.zbus)
                 .await?
                 .ok_or(NetError::NotSupported)?;

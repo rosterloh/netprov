@@ -20,6 +20,10 @@ All notable changes to this project are documented in this file. Format follows
   after a request times out. A late reply to the timed-out request used to be
   read as the answer to the next one and rejected as an id mismatch, which then
   repeated for every later request on that connection; it is now discarded.
+- `netprovd`'s 30-second bound on NetworkManager writes (Wi-Fi connect, DHCP,
+  static IP) now includes time spent queued behind another write, so a queued
+  write answers with a timeout before the client's 35-second deadline instead
+  of replying after the client has given up.
 
 ## [1.1.2] — 2026-10-30
 

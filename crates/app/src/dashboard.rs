@@ -583,6 +583,7 @@ pub(crate) fn Dashboard(
                     }
                     div {
                         class: "network-list",
+                        role: "group",
                         aria_label: "Nearby Wi-Fi networks",
                         for network in wifi_networks_view {
                             {
@@ -692,6 +693,7 @@ pub(crate) fn Dashboard(
                     p { class: "muted mono", "{selected_interface_summary}" }
                     div {
                         class: "interface-list",
+                        role: "group",
                         aria_label: "Network interfaces",
                         for interface_snapshot in interfaces_view {
                             {
@@ -889,10 +891,14 @@ pub(crate) fn Dashboard(
                             button {
                                 class: "secondary",
                                 r#type: "button",
-                                autofocus: true,
                                 disabled: ip_is_busy,
+                                // `autofocus` only fires for the first one in a
+                                // document's lifetime, so a reopened dialog
+                                // would leave focus behind the inert workspace.
                                 onmounted: move |event| {
-                                    cancel_ip_button_element.set(Some(event.data()))
+                                    let element = event.data();
+                                    cancel_ip_button_element.set(Some(element.clone()));
+                                    focus_mounted(Some(element));
                                 },
                                 onkeydown: move |event: KeyboardEvent| {
                                     if event.key() == Key::Tab {

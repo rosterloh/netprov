@@ -12,7 +12,10 @@ All notable changes to this project are documented in this file. Format follows
   The "block input while confirming or disconnecting" flag was written as
   `inert="false"`, which the webview treats as inert, so tabs, forms and the
   Disconnect button ignored clicks and keyboard focus.
-
+- Desktop app accessibility: the device-scan status is one live region whose
+  text changes (so screen readers announce each scan result), the device,
+  Wi-Fi and interface lists are labelled groups, and the IPv4 confirmation
+  dialog moves focus to "Cancel" every time it opens, not only the first time.
 
 ## [1.1.2] — 2026-10-30
 

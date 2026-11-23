@@ -1,4 +1,4 @@
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -39,7 +39,7 @@ const CLIENT_LABEL: &[u8] = b"netprov-auth-client-v2";
 const SERVER_LABEL: &[u8] = b"netprov-auth-server-v2";
 
 fn tag_with(label: &[u8], psk: &Psk, server_nonce: &Nonce, client_nonce: &Nonce) -> Tag {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(psk).expect("HMAC accepts any key len");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(psk).expect("HMAC accepts any key len");
     mac.update(label);
     mac.update(server_nonce);
     mac.update(client_nonce);
@@ -92,6 +92,24 @@ mod tests {
 
     const NS: Nonce = [42u8; NONCE_LEN];
     const NC: Nonce = [99u8; NONCE_LEN];
+
+    /// Tags computed independently (Python `hmac`), so a crypto crate bump
+    /// that changes the output breaks here instead of in the field.
+    #[test]
+    fn tags_match_known_answers() {
+        let psk: Psk = std::array::from_fn(|i| i as u8);
+        let ns: Nonce = [0xA5; NONCE_LEN];
+        let nc: Nonce = std::array::from_fn(|i| (i + 32) as u8);
+        let hex = |t: Tag| t.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(client_tag(&psk, &ns, &nc)),
+            "4cd26f268a11402176468f421185f28e9a656da182882c813cce7aa66a104cdf"
+        );
+        assert_eq!(
+            hex(server_tag(&psk, &ns, &nc)),
+            "cc9ffeef1c64142346cc9db9a120ead746145ce8c29a1e55981692e7b433c5e1"
+        );
+    }
 
     #[test]
     fn verify_accepts_correct_tags() {

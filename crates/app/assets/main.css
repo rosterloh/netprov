@@ -609,6 +609,12 @@ dialog::backdrop {
   font-size: 0.88rem;
 }
 
+/* Kept in the accessibility tree while empty, so the live region persists. */
+.toast-empty {
+  opacity: 0;
+  pointer-events: none;
+}
+
 @keyframes pulse {
   50% {
     opacity: 0.4;

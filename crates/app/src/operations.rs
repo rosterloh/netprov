@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 const CONVERGENCE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
+const MIN_WIFI_PASSWORD_LEN: usize = 8;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MutationFailure {
@@ -206,6 +207,12 @@ pub(crate) async fn connect_selected_wifi(
     .map_err(MutationFailure::Confirmation)
 }
 
+/// Rows are keyed and selected by BSSID, so each may appear only once.
+pub(crate) fn dedupe_wifi_networks(networks: &mut Vec<WifiNetwork>) {
+    let mut seen = std::collections::HashSet::new();
+    networks.retain(|network| seen.insert(network.bssid.clone()));
+}
+
 pub(crate) fn sort_wifi_networks(networks: &mut [WifiNetwork]) {
     networks.sort_by_key(|network| std::cmp::Reverse(network.signal.unwrap_or(0)));
 }
@@ -270,11 +277,15 @@ pub(crate) fn prepare_ip_change(
     Ok((iface, config))
 }
 
+pub(crate) fn wifi_password_too_short(security: Option<&Security>, password: &str) -> bool {
+    !matches!(security, Some(Security::Open)) && password.len() < MIN_WIFI_PASSWORD_LEN
+}
+
 fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCredential, String> {
     if matches!(security, Some(Security::Open)) {
         return Ok(WifiCredential::Open);
     }
-    if password.len() < 8 {
+    if wifi_password_too_short(security, password) {
         return Err("Enter a password with at least 8 characters.".into());
     }
     match security {
@@ -382,6 +393,10 @@ pub(crate) async fn connect_device(
         }
     };
     Ok((Arc::new(Mutex::new(client)), snapshot))
+}
+
+pub(crate) async fn fetch_snapshot(client: SharedClient) -> Result<DeviceSnapshot, String> {
+    load_snapshot(&mut *client.lock().await).await
 }
 
 async fn load_snapshot(client: &mut Netprov<BleClient>) -> Result<DeviceSnapshot, String> {
@@ -516,6 +531,35 @@ mod tests {
         assert!(wifi_credential(Some(&Security::Wep), "password").is_err());
         assert!(wifi_credential(Some(&Security::Wpa3), "short").is_err());
         assert!(wifi_credential(None, "password").is_err());
+    }
+
+    #[test]
+    fn short_password_is_flagged_only_where_one_is_needed() {
+        assert!(wifi_password_too_short(Some(&Security::Wpa2Psk), "short"));
+        assert!(wifi_password_too_short(None, ""));
+        assert!(!wifi_password_too_short(
+            Some(&Security::Wpa2Psk),
+            "password"
+        ));
+        assert!(!wifi_password_too_short(Some(&Security::Open), ""));
+    }
+
+    #[test]
+    fn dedupe_keeps_the_first_network_per_bssid() {
+        let network = |ssid: &str, bssid: &str| WifiNetwork {
+            ssid: ssid.into(),
+            signal: None,
+            security: None,
+            bssid: bssid.into(),
+        };
+        let mut networks = vec![network("a", "1"), network("b", "2"), network("c", "1")];
+
+        dedupe_wifi_networks(&mut networks);
+
+        assert_eq!(
+            networks.iter().map(|n| n.ssid.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
     }
 
     #[test]

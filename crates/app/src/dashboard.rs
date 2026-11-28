@@ -1,11 +1,15 @@
 use crate::operations::{
-    DeviceSnapshot, SharedClient, StaticIpv4Invalid, apply_ip_config, connect_selected_wifi,
-    mutation_failure_message, prepare_ip_change, replace_interface_config, scan_wifi,
-    sort_wifi_networks, static_ipv4_invalid_fields,
+    DeviceSnapshot, InterfaceSnapshot, SharedClient, StaticIpv4Invalid, apply_ip_config,
+    connect_selected_wifi, dedupe_wifi_networks, fetch_snapshot, mutation_failure_message,
+    prepare_ip_change, replace_interface_config, scan_wifi, sort_wifi_networks,
+    static_ipv4_invalid_fields, wifi_password_too_short,
 };
 use dioxus::prelude::*;
 use netprov_protocol::{Ipv4Method, Security, StaticIpv4, WifiNetwork};
 use std::rc::Rc;
+use std::time::Duration;
+
+const TOAST_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveTab {
@@ -54,10 +58,52 @@ fn focus_mounted(element: Option<Rc<MountedData>>) {
         });
     }
 }
+
+/// The success toast, shared by the panels that report into it.
+#[derive(Clone, Copy, PartialEq)]
+struct Toast {
+    message: Signal<Option<String>>,
+    generation: Signal<u32>,
+}
+
+impl Toast {
+    fn clear(mut self) {
+        // A write notifies readers even when nothing changed.
+        if self.message.peek().is_some() {
+            self.message.set(None);
+        }
+    }
+
+    fn show(mut self, text: String) {
+        let generation = self.generation.peek().wrapping_add(1);
+        self.generation.set(generation);
+        self.message.set(Some(text));
+        spawn(async move {
+            tokio::time::sleep(TOAST_DURATION).await;
+            // A newer toast owns the region by now.
+            if *self.generation.peek() == generation {
+                self.message.set(None);
+            }
+        });
+    }
+}
+
+/// Refetches what a mutation's reply does not carry: a new lease, link state.
+// shortcut: one refetch as soon as the change converges, so a DHCP lease that
+// lands later is still missed; poll until an address appears if that shows up.
+async fn refresh_snapshot(client: SharedClient, mut snapshot: Signal<Option<DeviceSnapshot>>) {
+    if let Ok(next) = fetch_snapshot(client).await
+        // A disconnect may have cleared it while this waited for the client.
+        && snapshot.peek().is_some()
+    {
+        snapshot.set(Some(next));
+    }
+}
+
 #[component]
 pub(crate) fn Dashboard(
     client: Signal<Option<SharedClient>>,
-    mut snapshot: Signal<Option<DeviceSnapshot>>,
+    snapshot: Signal<Option<DeviceSnapshot>>,
     device_name: String,
     device_detail: String,
     disconnecting: bool,
@@ -65,56 +111,30 @@ pub(crate) fn Dashboard(
     ondisconnect: EventHandler<()>,
 ) -> Element {
     let mut active_tab = use_signal(|| ActiveTab::Overview);
-    let mut wifi_networks = use_signal(Vec::<WifiNetwork>::new);
-    let mut selected_bssid = use_signal(|| None::<String>);
-    let mut wifi_password = use_signal(String::new);
-    let mut wifi_operation = use_signal(|| WifiOperation::Idle);
-    let mut wifi_error = use_signal(|| None::<String>);
-    let mut success_message = use_signal(|| None::<String>);
-    let mut selected_interface = use_signal(|| None::<String>);
-    let mut dhcp_mode = use_signal(|| true);
-    let mut address = use_signal(String::new);
-    let mut gateway = use_signal(String::new);
-    let mut dns = use_signal(String::new);
-    let mut ip_busy = use_signal(|| false);
-    let mut ip_error = use_signal(|| None::<String>);
-    let mut ip_invalid = use_signal(StaticIpv4Invalid::default);
-    let mut confirm_ip = use_signal(|| false);
-    let mut restore_ip_focus = use_signal(|| false);
-    let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
+    // Owned here rather than by the interfaces panel: it blocks the whole
+    // workspace, not just that panel.
+    let confirm_ip = use_signal(|| false);
+    let toast = Toast {
+        message: use_signal(|| None),
+        generation: use_signal(|| 0),
+    };
     let mut overview_tab_element = use_signal(|| None::<Rc<MountedData>>);
     let mut wifi_tab_element = use_signal(|| None::<Rc<MountedData>>);
     let mut interfaces_tab_element = use_signal(|| None::<Rc<MountedData>>);
-    let mut apply_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
-    let mut cancel_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
-    let mut confirm_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
 
-    let snapshot_view = snapshot().expect("dashboard requires a connected device");
+    // The parent drops this component when the snapshot goes, but both
+    // subscribe to it, so do not rely on the parent rendering first.
+    let Some(snapshot_view) = snapshot() else {
+        return rsx! {};
+    };
     let active_tab_view = active_tab();
-    let wifi_networks_view = wifi_networks();
-    let selected_bssid_view = selected_bssid();
-    let wifi_password_view = wifi_password();
-    let wifi_error_view = wifi_error();
-    let success_message_view = success_message();
-    let selected_interface_view = selected_interface();
-    let dhcp_mode_view = dhcp_mode();
-    let address_view = address();
-    let gateway_view = gateway();
-    let dns_view = dns();
-    let ip_error_view = ip_error();
-    let ip_invalid_view = ip_invalid();
-    let confirm_ip_view = confirm_ip();
-    let wifi_operation_view = wifi_operation();
-    let wifi_is_busy = wifi_operation_view != WifiOperation::Idle;
-    let wifi_is_scanning = wifi_operation_view == WifiOperation::Scanning;
-    let wifi_is_connecting = wifi_operation_view == WifiOperation::Connecting;
-    let ip_is_busy = ip_busy();
     let overview_active = active_tab_view == ActiveTab::Overview;
     let wifi_active = active_tab_view == ActiveTab::Wifi;
     let interfaces_active = active_tab_view == ActiveTab::Interfaces;
-    let interfaces_view = snapshot_view.interfaces.clone();
+    let blocked = confirm_ip() || disconnecting;
+    let interfaces_view = snapshot_view.interfaces;
     let overview_interfaces = interfaces_view.clone();
-    let current_ssid = snapshot_view.wifi_status.ssid.clone();
+    let current_ssid = snapshot_view.wifi_status.ssid;
     let wifi_ssid = current_ssid
         .clone()
         .unwrap_or_else(|| "Not connected".into());
@@ -129,95 +149,11 @@ pub(crate) fn Dashboard(
         .as_ref()
         .map(|security| format!("{security:?}"))
         .unwrap_or_else(|| "Security unavailable".into());
-    let selected_network_view = selected_bssid_view
-        .as_deref()
-        .and_then(|bssid| {
-            wifi_networks_view
-                .iter()
-                .find(|network| network.bssid == bssid)
-        })
-        .cloned();
-    let wifi_form_title = selected_network_view
-        .as_ref()
-        .map(|network| network.ssid.clone())
-        .unwrap_or_else(|| "Select a network".into());
-    let wifi_form_copy = selected_network_view
-        .as_ref()
-        .map(|network| {
-            let security = network
-                .security
-                .as_ref()
-                .map(|security| format!("{security:?}"))
-                .unwrap_or_else(|| "Unknown security".into());
-            let signal = network
-                .signal
-                .map(|signal| format!("{signal}%"))
-                .unwrap_or_else(|| "unknown".into());
-            format!("{security} network · {signal} signal")
-        })
-        .unwrap_or_else(|| "Choose a network to enter its credentials.".into());
-    let needs_wifi_password = selected_network_view
-        .as_ref()
-        .is_some_and(|network| !matches!(network.security.as_ref(), Some(&Security::Open)));
-    let wifi_password_invalid = wifi_error_view
-        .as_deref()
-        .is_some_and(|error| error.contains("password"));
-    let selected_interface_snapshot = selected_interface_view
-        .as_deref()
-        .and_then(|name| {
-            interfaces_view
-                .iter()
-                .find(|snapshot| snapshot.interface.name == name)
-        })
-        .cloned();
-    let selected_interface_title = selected_interface_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.interface.name.clone())
-        .unwrap_or_else(|| "Select an interface".into());
-    let selected_interface_detail = selected_interface_snapshot
-        .as_ref()
-        .map(|snapshot| {
-            format!(
-                "{:?} · {}",
-                snapshot.interface.iface_type,
-                snapshot
-                    .interface
-                    .mac
-                    .as_deref()
-                    .unwrap_or("MAC unavailable")
-            )
-        })
-        .unwrap_or_else(|| "Choose an interface to edit its IPv4 configuration.".into());
-    let selected_interface_summary = selected_interface_snapshot
-        .as_ref()
-        .map(|snapshot| {
-            let address = snapshot
-                .config
-                .addresses
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "No address".into());
-            format!("{} · {address}", ipv4_method_label(&snapshot.config.method))
-        })
-        .unwrap_or_else(|| format!("{} interfaces available", interfaces_view.len()));
     let configured_interfaces = overview_interfaces
         .iter()
         .filter(|snapshot| !snapshot.config.addresses.is_empty())
         .count();
-    let wifi_status_text = wifi_status_message(
-        wifi_operation_view,
-        selected_network_view
-            .as_ref()
-            .map(|network| network.ssid.as_str()),
-        wifi_networks_view.len(),
-    );
-
-    use_effect(move || {
-        if restore_ip_focus() && !confirm_ip() && !ip_busy() {
-            restore_ip_focus.set(false);
-            focus_mounted(apply_ip_button_element.cloned());
-        }
-    });
+    let toast_text = (toast.message)().unwrap_or_default();
 
     let navigate_tabs = move |event: KeyboardEvent| {
         let direction = match event.key() {
@@ -235,136 +171,12 @@ pub(crate) fn Dashboard(
         });
     };
 
-    let scan = move |_| {
-        let Some(client) = client() else {
-            return;
-        };
-        wifi_operation.set(WifiOperation::Scanning);
-        wifi_error.set(None);
-        success_message.set(None);
-        spawn(async move {
-            match scan_wifi(client).await {
-                Ok(mut networks) => {
-                    sort_wifi_networks(&mut networks);
-                    wifi_networks.set(networks);
-                    selected_bssid.set(None);
-                }
-                Err(err) => wifi_error.set(Some(err)),
-            }
-            wifi_operation.set(WifiOperation::Idle);
-        });
-    };
-
-    let connect_wifi = move |event: FormEvent| {
-        event.prevent_default();
-        let Some(client) = client() else {
-            return;
-        };
-        let Some(bssid) = selected_bssid() else {
-            wifi_error.set(Some("Select a Wi-Fi network.".into()));
-            return;
-        };
-        let Some(network) = wifi_networks()
-            .into_iter()
-            .find(|network| network.bssid == bssid)
-        else {
-            wifi_error.set(Some(
-                "The selected Wi-Fi network is no longer available.".into(),
-            ));
-            return;
-        };
-        let ssid = network.ssid.clone();
-        let password = wifi_password();
-        wifi_operation.set(WifiOperation::Connecting);
-        wifi_error.set(None);
-        success_message.set(None);
-        spawn(async move {
-            match connect_selected_wifi(client, network, password).await {
-                Ok(status) => {
-                    snapshot.with_mut(|snapshot| {
-                        if let Some(snapshot) = snapshot {
-                            snapshot.wifi_status = status;
-                        }
-                    });
-                    wifi_password.set(String::new());
-                    success_message.set(Some(format!("Connected to {ssid}")));
-                }
-                Err(err) => wifi_error.set(Some(mutation_failure_message("Wi-Fi connection", err))),
-            }
-            wifi_operation.set(WifiOperation::Idle);
-        });
-    };
-
-    let request_ip_change = move |event: FormEvent| {
-        event.prevent_default();
-        let invalid = if dhcp_mode() {
-            StaticIpv4Invalid::default()
-        } else {
-            static_ipv4_invalid_fields(&address(), &gateway(), &dns())
-        };
-        ip_invalid.set(invalid);
-        match prepare_ip_change(
-            selected_interface(),
-            dhcp_mode(),
-            &address(),
-            &gateway(),
-            &dns(),
-        ) {
-            Ok(change) => {
-                pending_ip_change.set(Some(change));
-                ip_error.set(None);
-                confirm_ip.set(true);
-            }
-            Err(err) => {
-                confirm_ip.set(false);
-                ip_error.set(Some(err));
-            }
-        }
-    };
-
-    let mut close_ip_confirmation = move || {
-        confirm_ip.set(false);
-        pending_ip_change.set(None);
-        restore_ip_focus.set(true);
-    };
-
-    let apply_ip = move |_| {
-        let Some(client) = client() else {
-            return;
-        };
-        let Some((iface, config)) = pending_ip_change() else {
-            return;
-        };
-        confirm_ip.set(false);
-        ip_busy.set(true);
-        ip_error.set(None);
-        success_message.set(None);
-        spawn(async move {
-            match apply_ip_config(client, iface.clone(), config).await {
-                Ok(config) => {
-                    snapshot.with_mut(|snapshot| {
-                        if let Some(snapshot) = snapshot {
-                            replace_interface_config(snapshot, &iface, config);
-                        }
-                    });
-                    pending_ip_change.set(None);
-                    success_message.set(Some("Network configuration updated".into()));
-                }
-                Err(err) => {
-                    ip_error.set(Some(mutation_failure_message("Network configuration", err)))
-                }
-            }
-            ip_busy.set(false);
-            restore_ip_focus.set(true);
-        });
-    };
-
     rsx! {
         section { id: "workspace-view",
         // `inert` is not in the interpreter's boolean-attribute list, so a
         // `false` would still be written as `inert="false"`, which makes the
         // element inert. Omit the attribute instead.
-        div { inert: if confirm_ip_view || disconnecting { "true" },
+        div { inert: if blocked { "true" },
         header { class: "device-header",
             div {
                 p { class: "eyebrow", "Connected device" }
@@ -558,11 +370,178 @@ pub(crate) fn Dashboard(
             }
         }
 
+        WifiPanel {
+            client,
+            snapshot,
+            toast,
+            active: wifi_active,
+            current_ssid: current_ssid.clone(),
+        }
+        }
+
+        InterfacesPanel {
+            client,
+            snapshot,
+            toast,
+            confirm_ip,
+            active: interfaces_active,
+            blocked,
+            interfaces: interfaces_view,
+        }
+
+        // One persistent live region whose text changes, as in `ScanStatus`.
+        div {
+            class: if toast_text.is_empty() { "toast toast-empty" } else { "toast" },
+            role: "status",
+            aria_live: "polite",
+            "{toast_text}"
+        }
+        }
+    }
+}
+
+#[component]
+fn WifiPanel(
+    client: Signal<Option<SharedClient>>,
+    mut snapshot: Signal<Option<DeviceSnapshot>>,
+    toast: Toast,
+    active: bool,
+    current_ssid: Option<String>,
+) -> Element {
+    let mut wifi_networks = use_signal(Vec::<WifiNetwork>::new);
+    let mut selected_bssid = use_signal(|| None::<String>);
+    let mut wifi_password = use_signal(String::new);
+    let mut wifi_operation = use_signal(|| WifiOperation::Idle);
+    let mut wifi_error = use_signal(|| None::<String>);
+    let mut password_too_short = use_signal(|| false);
+
+    let wifi_networks_view = wifi_networks();
+    let selected_bssid_view = selected_bssid();
+    let wifi_password_view = wifi_password();
+    let wifi_error_view = wifi_error();
+    let wifi_password_invalid = password_too_short();
+    let wifi_operation_view = wifi_operation();
+    let wifi_is_busy = wifi_operation_view != WifiOperation::Idle;
+    let wifi_is_scanning = wifi_operation_view == WifiOperation::Scanning;
+    let wifi_is_connecting = wifi_operation_view == WifiOperation::Connecting;
+    let selected_network_view = selected_bssid_view
+        .as_deref()
+        .and_then(|bssid| {
+            wifi_networks_view
+                .iter()
+                .find(|network| network.bssid == bssid)
+        })
+        .cloned();
+    let wifi_form_title = selected_network_view
+        .as_ref()
+        .map(|network| network.ssid.clone())
+        .unwrap_or_else(|| "Select a network".into());
+    let wifi_form_copy = selected_network_view
+        .as_ref()
+        .map(|network| {
+            let security = network
+                .security
+                .as_ref()
+                .map(|security| format!("{security:?}"))
+                .unwrap_or_else(|| "Unknown security".into());
+            let signal = network
+                .signal
+                .map(|signal| format!("{signal}%"))
+                .unwrap_or_else(|| "unknown".into());
+            format!("{security} network · {signal} signal")
+        })
+        .unwrap_or_else(|| "Choose a network to enter its credentials.".into());
+    let needs_wifi_password = selected_network_view
+        .as_ref()
+        .is_some_and(|network| !matches!(network.security.as_ref(), Some(&Security::Open)));
+    let wifi_status_text = wifi_status_message(
+        wifi_operation_view,
+        selected_network_view
+            .as_ref()
+            .map(|network| network.ssid.as_str()),
+        wifi_networks_view.len(),
+    );
+
+    let scan = move |_| {
+        // `disabled` only lands with the next render; a queued click can beat it.
+        if wifi_operation() != WifiOperation::Idle {
+            return;
+        }
+        let Some(client) = client() else {
+            return;
+        };
+        wifi_operation.set(WifiOperation::Scanning);
+        wifi_error.set(None);
+        password_too_short.set(false);
+        toast.clear();
+        spawn(async move {
+            match scan_wifi(client).await {
+                Ok(mut networks) => {
+                    sort_wifi_networks(&mut networks);
+                    dedupe_wifi_networks(&mut networks);
+                    wifi_networks.set(networks);
+                    selected_bssid.set(None);
+                }
+                Err(err) => wifi_error.set(Some(err)),
+            }
+            wifi_operation.set(WifiOperation::Idle);
+        });
+    };
+
+    let connect_wifi = move |event: FormEvent| {
+        event.prevent_default();
+        if wifi_operation() != WifiOperation::Idle {
+            return;
+        }
+        let Some(client) = client() else {
+            return;
+        };
+        let Some(bssid) = selected_bssid() else {
+            wifi_error.set(Some("Select a Wi-Fi network.".into()));
+            return;
+        };
+        let Some(network) = wifi_networks()
+            .into_iter()
+            .find(|network| network.bssid == bssid)
+        else {
+            wifi_error.set(Some(
+                "The selected Wi-Fi network is no longer available.".into(),
+            ));
+            return;
+        };
+        let ssid = network.ssid.clone();
+        let password = wifi_password();
+        password_too_short.set(wifi_password_too_short(
+            network.security.as_ref(),
+            &password,
+        ));
+        wifi_operation.set(WifiOperation::Connecting);
+        wifi_error.set(None);
+        toast.clear();
+        spawn(async move {
+            match connect_selected_wifi(client.clone(), network, password).await {
+                Ok(status) => {
+                    snapshot.with_mut(|snapshot| {
+                        if let Some(snapshot) = snapshot {
+                            snapshot.wifi_status = status;
+                        }
+                    });
+                    refresh_snapshot(client, snapshot).await;
+                    wifi_password.set(String::new());
+                    toast.show(format!("Connected to {ssid}"));
+                }
+                Err(err) => wifi_error.set(Some(mutation_failure_message("Wi-Fi connection", err))),
+            }
+            wifi_operation.set(WifiOperation::Idle);
+        });
+    };
+
+    rsx! {
         section {
             id: "wifi-panel",
             role: "tabpanel",
             aria_labelledby: "wifi-tab",
-            hidden: !wifi_active,
+            hidden: !active,
             div { class: "network-layout",
                 div { class: "panel",
                     div { class: "panel-heading",
@@ -586,6 +565,7 @@ pub(crate) fn Dashboard(
                         role: "group",
                         aria_label: "Nearby Wi-Fi networks",
                         for network in wifi_networks_view {
+                            Fragment { key: "{network.bssid}",
                             {
                                 let selected = selected_bssid_view.as_deref()
                                     == Some(network.bssid.as_str());
@@ -608,7 +588,6 @@ pub(crate) fn Dashboard(
                                 let selected_network = network.clone();
                                 rsx! {
                                     button {
-                                        key: "{network.bssid}",
                                         class: row_class,
                                         r#type: "button",
                                         aria_pressed: selected,
@@ -618,6 +597,7 @@ pub(crate) fn Dashboard(
                                                 selected_network.bssid.clone()
                                             ));
                                             wifi_error.set(None);
+                                            password_too_short.set(false);
                                         },
                                         span {
                                             strong { "{network.ssid}" }
@@ -634,6 +614,7 @@ pub(crate) fn Dashboard(
                                         span { class: "mono signal", "{signal}" }
                                     }
                                 }
+                            }
                             }
                         }
                     }
@@ -680,12 +661,166 @@ pub(crate) fn Dashboard(
                 }
             }
         }
+    }
+}
 
+#[component]
+fn InterfacesPanel(
+    client: Signal<Option<SharedClient>>,
+    mut snapshot: Signal<Option<DeviceSnapshot>>,
+    toast: Toast,
+    mut confirm_ip: Signal<bool>,
+    active: bool,
+    blocked: bool,
+    interfaces: Vec<InterfaceSnapshot>,
+) -> Element {
+    let mut selected_interface = use_signal(|| None::<String>);
+    let mut dhcp_mode = use_signal(|| true);
+    let mut address = use_signal(String::new);
+    let mut gateway = use_signal(String::new);
+    let mut dns = use_signal(String::new);
+    let mut ip_busy = use_signal(|| false);
+    let mut ip_error = use_signal(|| None::<String>);
+    let mut ip_invalid = use_signal(StaticIpv4Invalid::default);
+    let mut restore_ip_focus = use_signal(|| false);
+    let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
+    let mut apply_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut cancel_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
+    let mut confirm_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
+
+    use_effect(move || {
+        if restore_ip_focus() && !confirm_ip() && !ip_busy() {
+            restore_ip_focus.set(false);
+            focus_mounted(apply_ip_button_element.cloned());
+        }
+    });
+
+    let interfaces_view = interfaces;
+    let selected_interface_view = selected_interface();
+    let dhcp_mode_view = dhcp_mode();
+    let address_view = address();
+    let gateway_view = gateway();
+    let dns_view = dns();
+    let ip_error_view = ip_error();
+    let ip_invalid_view = ip_invalid();
+    let confirm_ip_view = confirm_ip();
+    let ip_is_busy = ip_busy();
+    let selected_interface_snapshot = selected_interface_view
+        .as_deref()
+        .and_then(|name| {
+            interfaces_view
+                .iter()
+                .find(|snapshot| snapshot.interface.name == name)
+        })
+        .cloned();
+    let selected_interface_title = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.interface.name.clone())
+        .unwrap_or_else(|| "Select an interface".into());
+    let selected_interface_detail = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            format!(
+                "{:?} · {}",
+                snapshot.interface.iface_type,
+                snapshot
+                    .interface
+                    .mac
+                    .as_deref()
+                    .unwrap_or("MAC unavailable")
+            )
+        })
+        .unwrap_or_else(|| "Choose an interface to edit its IPv4 configuration.".into());
+    let selected_interface_summary = selected_interface_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            let address = snapshot
+                .config
+                .addresses
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "No address".into());
+            format!("{} · {address}", ipv4_method_label(&snapshot.config.method))
+        })
+        .unwrap_or_else(|| format!("{} interfaces available", interfaces_view.len()));
+
+    let request_ip_change = move |event: FormEvent| {
+        event.prevent_default();
+        let invalid = if dhcp_mode() {
+            StaticIpv4Invalid::default()
+        } else {
+            static_ipv4_invalid_fields(&address(), &gateway(), &dns())
+        };
+        ip_invalid.set(invalid);
+        match prepare_ip_change(
+            selected_interface(),
+            dhcp_mode(),
+            &address(),
+            &gateway(),
+            &dns(),
+        ) {
+            Ok(change) => {
+                pending_ip_change.set(Some(change));
+                ip_error.set(None);
+                confirm_ip.set(true);
+            }
+            Err(err) => {
+                confirm_ip.set(false);
+                ip_error.set(Some(err));
+            }
+        }
+    };
+
+    let mut close_ip_confirmation = move || {
+        confirm_ip.set(false);
+        pending_ip_change.set(None);
+        restore_ip_focus.set(true);
+    };
+
+    let apply_ip = move |_| {
+        // `disabled` only lands with the next render; a queued click can beat it.
+        if ip_busy() {
+            return;
+        }
+        let Some(client) = client() else {
+            return;
+        };
+        let Some((iface, config)) = pending_ip_change() else {
+            return;
+        };
+        confirm_ip.set(false);
+        ip_busy.set(true);
+        ip_error.set(None);
+        toast.clear();
+        spawn(async move {
+            match apply_ip_config(client.clone(), iface.clone(), config).await {
+                Ok(config) => {
+                    snapshot.with_mut(|snapshot| {
+                        if let Some(snapshot) = snapshot {
+                            replace_interface_config(snapshot, &iface, config);
+                        }
+                    });
+                    pending_ip_change.set(None);
+                    refresh_snapshot(client, snapshot).await;
+                    toast.show("Network configuration updated".into());
+                }
+                Err(err) => {
+                    ip_error.set(Some(mutation_failure_message("Network configuration", err)))
+                }
+            }
+            ip_busy.set(false);
+            restore_ip_focus.set(true);
+        });
+    };
+
+    rsx! {
         section {
             id: "interfaces-panel",
             role: "tabpanel",
             aria_labelledby: "interfaces-tab",
-            hidden: !interfaces_active,
+            hidden: !active,
+            // Outside the workspace wrapper so the dialog below is not inert too.
+            inert: if blocked { "true" },
             div { class: "interface-layout",
                 div { class: "panel",
                     p { class: "eyebrow", "Network hardware" }
@@ -696,6 +831,7 @@ pub(crate) fn Dashboard(
                         role: "group",
                         aria_label: "Network interfaces",
                         for interface_snapshot in interfaces_view {
+                            Fragment { key: "{interface_snapshot.interface.name}",
                             {
                                 let selected = selected_interface_view.as_deref()
                                     == Some(interface_snapshot.interface.name.as_str());
@@ -714,7 +850,6 @@ pub(crate) fn Dashboard(
                                 let selected_snapshot = interface_snapshot.clone();
                                 rsx! {
                                     button {
-                                        key: "{iface.name}",
                                         class: row_class,
                                         r#type: "button",
                                         aria_pressed: selected,
@@ -761,6 +896,7 @@ pub(crate) fn Dashboard(
                                         span { class: "mono", "{address_text}" }
                                     }
                                 }
+                            }
                             }
                         }
                     }
@@ -865,7 +1001,6 @@ pub(crate) fn Dashboard(
                 }
             }
         }
-        }
 
         if confirm_ip_view {
             div { class: "dialog-overlay",
@@ -929,16 +1064,6 @@ pub(crate) fn Dashboard(
                     }
                 }
             }
-        }
-
-        if let Some(message) = success_message_view {
-            div {
-                class: "toast",
-                role: "status",
-                aria_live: "polite",
-                "{message}"
-            }
-        }
         }
     }
 }

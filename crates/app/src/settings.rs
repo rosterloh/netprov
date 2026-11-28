@@ -28,7 +28,7 @@ pub(crate) struct Connection {
 /// The stored values, with `--key-path` taking precedence and the packaged
 /// default filling in a missing path.
 pub(crate) fn load() -> Connection {
-    let mut connection = settings_dir().map(read).unwrap_or_default();
+    let mut connection = settings_dir().map(|dir| read(&dir)).unwrap_or_default();
     if let Some(over_ride) = key_path_arg() {
         connection.key_path = over_ride;
     }
@@ -47,7 +47,7 @@ pub(crate) fn save(peer: &str, key_path: &str) {
 }
 
 /// A missing or unreadable file is simply "nothing stored yet".
-fn read(dir: PathBuf) -> Connection {
+fn read(dir: &Path) -> Connection {
     std::fs::read_to_string(dir.join(FILE_NAME))
         .map(|contents| parse(&contents))
         .unwrap_or_default()
@@ -173,7 +173,7 @@ mod tests {
         write(&dir, "opaque-peer", "/tmp/key").expect("settings should be writable");
 
         assert_eq!(
-            read(dir.clone()),
+            read(&dir),
             Connection {
                 peer: "opaque-peer".into(),
                 key_path: "/tmp/key".into(),
@@ -188,6 +188,6 @@ mod tests {
         let dir = std::env::temp_dir().join("netprov-settings-absent");
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(read(dir), Connection::default());
+        assert_eq!(read(&dir), Connection::default());
     }
 }

@@ -357,7 +357,7 @@ pub(crate) fn App() -> Element {
         });
     };
 
-    let disconnect_window = window.clone();
+    let disconnect_window = window;
     let disconnect = move |_| {
         begin_disconnect(
             lifecycle,
@@ -372,7 +372,7 @@ pub(crate) fn App() -> Element {
         document::Stylesheet { href: MAIN_CSS }
         document::Title { "Netprov desktop app" }
         header { class: "app-header",
-            a { class: "brand", href: "#app", aria_label: "Netprov home", "netprov" }
+            span { class: "brand", "netprov" }
             span { class: "header-rule", aria_hidden: "true" }
             p { "Secure network setup over Bluetooth" }
         }
@@ -404,7 +404,7 @@ pub(crate) fn App() -> Element {
                     div {
                         class: if is_scanning { "scan-line scanning" } else { "scan-line" },
                         span { class: "scan-dot", aria_hidden: "true" }
-                        ScanStatus { state: scan_state_view.clone(), count: devices_view.len() }
+                        ScanStatus { state: scan_state_view, count: devices_view.len() }
                     }
 
                     DeviceList {
@@ -510,6 +510,7 @@ fn DeviceList(
                 p { class: "muted", "Scan to discover nearby Netprov devices." }
             }
             for device in devices {
+                Fragment { key: "{device.id}",
                 {
                     let selected = selected_peer.as_deref() == Some(&device.id);
                     let row_class = if selected {
@@ -536,6 +537,7 @@ fn DeviceList(
                             span { class: "mono", "{signal}" }
                         }
                     }
+                }
                 }
             }
         }

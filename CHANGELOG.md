@@ -32,6 +32,22 @@ All notable changes to this project are documented in this file. Format follows
   text changes (so screen readers announce each scan result), the device,
   Wi-Fi and interface lists are labelled groups, and the IPv4 confirmation
   dialog moves focus to "Cancel" every time it opens, not only the first time.
+- The desktop app re-reads the device's interfaces after a Wi-Fi connection or
+  IPv4 change, so the Overview and Interfaces tabs show the new address and link
+  state instead of the values from when the session was opened.
+- Clicking the "netprov" wordmark in the desktop app no longer asks the system
+  browser to open `#app`; it is no longer a link.
+- The desktop app ignores a second Wi-Fi scan, Wi-Fi connect or "Apply changes"
+  click that arrives while the first is still running, so an IPv4 change can no
+  longer be sent twice.
+- The desktop app's success toast disappears after five seconds and is one
+  persistent live region, so screen readers announce each message.
+- The desktop app lists a Wi-Fi access point once when the device reports the
+  same BSSID twice.
+- The desktop app says so when a change was applied but re-reading the device
+  state afterwards failed, instead of silently showing the old values.
+- The desktop app shows Wi-Fi security, interface type and link state as plain
+  labels ("WPA2", "Wi-Fi", "Up") rather than internal names such as `Wpa2Psk`.
 
 ## [1.1.2] — 2026-10-30
 

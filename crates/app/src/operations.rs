@@ -19,6 +19,27 @@ pub(crate) enum MutationFailure {
     Confirmation(String),
 }
 
+/// The IPv4 form's text fields, named so they cannot be passed out of order.
+#[derive(Clone, Copy)]
+pub(crate) struct StaticIpv4Form<'a> {
+    pub(crate) address: &'a str,
+    pub(crate) gateway: &'a str,
+    pub(crate) dns: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Ipv4Change {
+    Dhcp,
+    Static(StaticIpv4),
+}
+
+/// An IPv4 change, bound to the interface it was prepared for.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IpChange {
+    pub(crate) iface: String,
+    pub(crate) config: Ipv4Change,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StaticIpv4Invalid {
     pub(crate) address: bool,
@@ -53,18 +74,15 @@ pub(crate) struct InterfaceSnapshot {
 
 pub(crate) type SharedClient = Arc<Mutex<Netprov<BleClient>>>;
 
-pub(crate) fn static_ipv4_invalid_fields(
-    address: &str,
-    gateway: &str,
-    dns: &str,
-) -> StaticIpv4Invalid {
-    let address = address.trim().parse();
-    let gateway = gateway.trim();
+pub(crate) fn static_ipv4_invalid_fields(form: StaticIpv4Form<'_>) -> StaticIpv4Invalid {
+    let address = form.address.trim().parse();
+    let gateway = form.gateway.trim();
     let gateway = match gateway {
         "" => Ok(None),
         value => value.parse().map(Some),
     };
-    let dns = dns
+    let dns = form
+        .dns
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -130,10 +148,10 @@ fn wifi_converged(status: &WifiStatus, requested_ssid: &str) -> bool {
     status.ssid.as_deref() == Some(requested_ssid)
 }
 
-fn ip_config_converged(actual: &IpConfig, requested: Option<&StaticIpv4>) -> bool {
+fn ip_config_converged(actual: &IpConfig, requested: &Ipv4Change) -> bool {
     match requested {
-        None => actual.method == Ipv4Method::Auto,
-        Some(requested) => {
+        Ipv4Change::Dhcp => actual.method == Ipv4Method::Auto,
+        Ipv4Change::Static(requested) => {
             let mut actual_dns = actual.dns.clone();
             let mut requested_dns = requested.dns.clone();
             actual_dns.sort_unstable();
@@ -217,12 +235,13 @@ pub(crate) fn sort_wifi_networks(networks: &mut [WifiNetwork]) {
     networks.sort_by_key(|network| std::cmp::Reverse(network.signal.unwrap_or(0)));
 }
 
-fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIpv4, String> {
-    let address = address
+fn parse_static_ipv4(form: StaticIpv4Form<'_>) -> Result<StaticIpv4, String> {
+    let address = form
+        .address
         .trim()
         .parse()
         .map_err(|_| "Enter a valid IPv4 address and CIDR prefix.".to_string())?;
-    let gateway = match gateway.trim() {
+    let gateway = match form.gateway.trim() {
         "" => None,
         value => Some(
             value
@@ -230,7 +249,8 @@ fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIp
                 .map_err(|_| "Enter a valid IPv4 gateway.".to_string())?,
         ),
     };
-    let dns = dns
+    let dns = form
+        .dns
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -264,17 +284,15 @@ fn parse_static_ipv4(address: &str, gateway: &str, dns: &str) -> Result<StaticIp
 pub(crate) fn prepare_ip_change(
     iface: Option<String>,
     dhcp: bool,
-    address: &str,
-    gateway: &str,
-    dns: &str,
-) -> Result<(String, Option<StaticIpv4>), String> {
+    form: StaticIpv4Form<'_>,
+) -> Result<IpChange, String> {
     let iface = iface.ok_or_else(|| "Select an interface.".to_string())?;
     let config = if dhcp {
-        None
+        Ipv4Change::Dhcp
     } else {
-        Some(parse_static_ipv4(address, gateway, dns)?)
+        Ipv4Change::Static(parse_static_ipv4(form)?)
     };
-    Ok((iface, config))
+    Ok(IpChange { iface, config })
 }
 
 pub(crate) fn wifi_password_too_short(security: Option<&Security>, password: &str) -> bool {
@@ -300,17 +318,19 @@ fn wifi_credential(security: Option<&Security>, password: &str) -> Result<WifiCr
 
 pub(crate) async fn apply_ip_config(
     client: SharedClient,
-    iface: String,
-    config: Option<StaticIpv4>,
+    change: IpChange,
 ) -> Result<IpConfig, MutationFailure> {
+    let IpChange {
+        iface,
+        config: requested,
+    } = change;
     let mut client = client.lock().await;
-    let requested = config.clone();
-    match config {
-        Some(config) => client
-            .set_static_ipv4(iface.clone(), config)
+    match &requested {
+        Ipv4Change::Static(config) => client
+            .set_static_ipv4(iface.clone(), config.clone())
             .await
             .map_err(|err| MutationFailure::Request(err.to_string()))?,
-        None => client
+        Ipv4Change::Dhcp => client
             .set_dhcp(iface.clone())
             .await
             .map_err(|err| MutationFailure::Request(err.to_string()))?,
@@ -322,7 +342,7 @@ pub(crate) async fn apply_ip_config(
                 .get_ip_config(iface.clone())
                 .await
                 .map_err(|err| err.to_string())?;
-            if ip_config_converged(&config, requested.as_ref()) {
+            if ip_config_converged(&config, &requested) {
                 return Ok(config);
             }
             tokio::time::sleep(CONVERGENCE_POLL_INTERVAL).await;
@@ -387,9 +407,8 @@ pub(crate) async fn connect_device(
     let snapshot = match load_snapshot(&mut client).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            let error = err.to_string();
             let _ = client.inner().disconnect().await;
-            return Err(error);
+            return Err(err);
         }
     };
     Ok((Arc::new(Mutex::new(client)), snapshot))
@@ -445,6 +464,14 @@ mod tests {
     use super::*;
     use netprov_protocol::{IfaceState, IfaceType, Ipv4Method, WifiNetwork};
 
+    fn form<'a>(address: &'a str, gateway: &'a str, dns: &'a str) -> StaticIpv4Form<'a> {
+        StaticIpv4Form {
+            address,
+            gateway,
+            dns,
+        }
+    }
+
     #[tokio::test]
     async fn rejects_empty_peer_before_connecting() {
         let result = connect_device("  ".into(), "/key/is/not/read".into()).await;
@@ -455,7 +482,7 @@ mod tests {
     #[test]
     fn parses_static_ipv4_form() {
         let config =
-            parse_static_ipv4("192.168.1.20/24", "192.168.1.1", "1.1.1.1, 8.8.8.8").unwrap();
+            parse_static_ipv4(form("192.168.1.20/24", "192.168.1.1", "1.1.1.1, 8.8.8.8")).unwrap();
 
         assert_eq!(config.address.to_string(), "192.168.1.20/24");
         assert_eq!(config.gateway.unwrap().to_string(), "192.168.1.1");
@@ -471,9 +498,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_static_ipv4_form() {
-        assert!(parse_static_ipv4("192.168.1.20/99", "", "1.1.1.1").is_err());
-        assert!(parse_static_ipv4("192.168.1.20/24", "999.1.1.1", "1.1.1.1").is_err());
-        assert!(parse_static_ipv4("192.168.1.20/24", "", "").is_err());
+        assert!(parse_static_ipv4(form("192.168.1.20/99", "", "1.1.1.1")).is_err());
+        assert!(parse_static_ipv4(form("192.168.1.20/24", "999.1.1.1", "1.1.1.1")).is_err());
+        assert!(parse_static_ipv4(form("192.168.1.20/24", "", "")).is_err());
     }
 
     #[test]
@@ -495,7 +522,7 @@ mod tests {
             ("192.168.1.10/24", "", "255.255.255.255"),
         ] {
             assert!(
-                parse_static_ipv4(address, gateway, dns).is_err(),
+                parse_static_ipv4(form(address, gateway, dns)).is_err(),
                 "server-invalid config accepted: {address}, {gateway}, {dns}"
             );
         }
@@ -508,7 +535,7 @@ mod tests {
             ("10.0.0.1/30", "10.0.0.2", "1.1.1.1"),
         ] {
             assert!(
-                parse_static_ipv4(address, gateway, dns).is_ok(),
+                parse_static_ipv4(form(address, gateway, dns)).is_ok(),
                 "server-valid config rejected: {address}, {gateway}, {dns}"
             );
         }
@@ -638,49 +665,57 @@ mod tests {
 
     #[test]
     fn pending_ip_change_owns_its_original_interface() {
-        let (iface, config) = prepare_ip_change(
+        let change = prepare_ip_change(
             Some("wlan0".into()),
             false,
-            "192.168.2.10/24",
-            "192.168.2.1",
-            "1.1.1.1",
+            form("192.168.2.10/24", "192.168.2.1", "1.1.1.1"),
         )
         .unwrap();
 
-        assert_eq!(iface, "wlan0");
-        assert_eq!(config.unwrap().address.to_string(), "192.168.2.10/24");
+        assert_eq!(change.iface, "wlan0");
+        let Ipv4Change::Static(config) = change.config else {
+            panic!("a static form must prepare a static change");
+        };
+        assert_eq!(config.address.to_string(), "192.168.2.10/24");
     }
 
     #[test]
     fn static_ipv4_invalid_state_is_field_specific() {
-        let invalid = static_ipv4_invalid_fields("not-an-address", "192.168.1.1", "1.1.1.1");
+        let invalid = static_ipv4_invalid_fields(form("not-an-address", "192.168.1.1", "1.1.1.1"));
         assert!(invalid.address);
         assert!(!invalid.gateway);
         assert!(!invalid.dns);
 
-        let invalid =
-            static_ipv4_invalid_fields("192.168.1.20/24", "not-a-gateway", "not-a-dns-address");
+        let invalid = static_ipv4_invalid_fields(form(
+            "192.168.1.20/24",
+            "not-a-gateway",
+            "not-a-dns-address",
+        ));
         assert!(!invalid.address);
         assert!(invalid.gateway);
         assert!(invalid.dns);
 
-        let invalid = static_ipv4_invalid_fields("192.168.1.0/24", "192.168.1.1", "1.1.1.1");
+        let invalid = static_ipv4_invalid_fields(form("192.168.1.0/24", "192.168.1.1", "1.1.1.1"));
         assert!(invalid.address);
         assert!(!invalid.gateway);
         assert!(!invalid.dns);
 
-        let invalid = static_ipv4_invalid_fields("192.168.1.20/24", "10.0.0.1", "1.1.1.1");
+        let invalid = static_ipv4_invalid_fields(form("192.168.1.20/24", "10.0.0.1", "1.1.1.1"));
         assert!(!invalid.address);
         assert!(invalid.gateway);
         assert!(!invalid.dns);
 
-        let invalid = static_ipv4_invalid_fields("192.168.1.20/24", "192.168.1.1", "224.0.0.1");
+        let invalid =
+            static_ipv4_invalid_fields(form("192.168.1.20/24", "192.168.1.1", "224.0.0.1"));
         assert!(!invalid.address);
         assert!(!invalid.gateway);
         assert!(invalid.dns);
 
-        let invalid =
-            static_ipv4_invalid_fields("192.168.1.0/24", "not-a-gateway", "not-a-dns-address");
+        let invalid = static_ipv4_invalid_fields(form(
+            "192.168.1.0/24",
+            "not-a-gateway",
+            "not-a-dns-address",
+        ));
         assert!(invalid.address);
         assert!(invalid.gateway);
         assert!(invalid.dns);
@@ -705,6 +740,7 @@ mod tests {
             gateway: Some("192.168.2.1".parse().unwrap()),
             dns: vec!["1.1.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap()],
         };
+        let requested = Ipv4Change::Static(requested);
         let actual = IpConfig {
             method: Ipv4Method::Manual,
             addresses: vec!["192.168.2.10/24".parse().unwrap()],
@@ -712,11 +748,11 @@ mod tests {
             dns: vec!["8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()],
         };
 
-        assert!(ip_config_converged(&actual, Some(&requested)));
+        assert!(ip_config_converged(&actual, &requested));
 
         let mut wrong_gateway = actual.clone();
         wrong_gateway.gateway = Some("192.168.2.254".parse().unwrap());
-        assert!(!ip_config_converged(&wrong_gateway, Some(&requested)));
+        assert!(!ip_config_converged(&wrong_gateway, &requested));
 
         let automatic = IpConfig {
             method: Ipv4Method::Auto,
@@ -724,7 +760,7 @@ mod tests {
             gateway: Some("10.0.0.1".parse().unwrap()),
             dns: vec!["10.0.0.1".parse().unwrap()],
         };
-        assert!(ip_config_converged(&automatic, None));
+        assert!(ip_config_converged(&automatic, &Ipv4Change::Dhcp));
     }
 
     #[test]

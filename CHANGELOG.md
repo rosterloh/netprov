@@ -44,6 +44,10 @@ All notable changes to this project are documented in this file. Format follows
   persistent live region, so screen readers announce each message.
 - The desktop app lists a Wi-Fi access point once when the device reports the
   same BSSID twice.
+- The desktop app says so when a change was applied but re-reading the device
+  state afterwards failed, instead of silently showing the old values.
+- The desktop app shows Wi-Fi security, interface type and link state as plain
+  labels ("WPA2", "Wi-Fi", "Up") rather than internal names such as `Wpa2Psk`.
 
 ## [1.1.2] — 2026-10-30
 

@@ -1,11 +1,11 @@
 use crate::operations::{
-    DeviceSnapshot, InterfaceSnapshot, SharedClient, StaticIpv4Invalid, apply_ip_config,
-    connect_selected_wifi, dedupe_wifi_networks, fetch_snapshot, mutation_failure_message,
-    prepare_ip_change, replace_interface_config, scan_wifi, sort_wifi_networks,
-    static_ipv4_invalid_fields, wifi_password_too_short,
+    DeviceSnapshot, InterfaceSnapshot, IpChange, SharedClient, StaticIpv4Form, StaticIpv4Invalid,
+    apply_ip_config, connect_selected_wifi, dedupe_wifi_networks, fetch_snapshot,
+    mutation_failure_message, prepare_ip_change, replace_interface_config, scan_wifi,
+    sort_wifi_networks, static_ipv4_invalid_fields, wifi_password_too_short,
 };
 use dioxus::prelude::*;
-use netprov_protocol::{Ipv4Method, Security, StaticIpv4, WifiNetwork};
+use netprov_protocol::{IfaceState, IfaceType, Ipv4Method, Security, WifiNetwork};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -29,6 +29,15 @@ enum WifiOperation {
     Idle,
     Scanning,
     Connecting,
+}
+
+/// The pending change lives in the state that needs it, so "confirming with
+/// nothing to confirm" and "confirming while applying" cannot be expressed.
+#[derive(Clone, Debug, PartialEq)]
+enum IpOperation {
+    Idle,
+    Confirming(IpChange),
+    Applying,
 }
 
 fn adjacent_tab(tab: ActiveTab, direction: TabDirection) -> ActiveTab {
@@ -91,13 +100,20 @@ impl Toast {
 /// Refetches what a mutation's reply does not carry: a new lease, link state.
 // shortcut: one refetch as soon as the change converges, so a DHCP lease that
 // lands later is still missed; poll until an address appears if that shows up.
-async fn refresh_snapshot(client: SharedClient, mut snapshot: Signal<Option<DeviceSnapshot>>) {
-    if let Ok(next) = fetch_snapshot(client).await
-        // A disconnect may have cleared it while this waited for the client.
-        && snapshot.peek().is_some()
-    {
+async fn refresh_snapshot(
+    client: SharedClient,
+    mut snapshot: Signal<Option<DeviceSnapshot>>,
+) -> Result<(), String> {
+    let next = fetch_snapshot(client).await?;
+    // A disconnect may have cleared it while this waited for the client.
+    if snapshot.peek().is_some() {
         snapshot.set(Some(next));
     }
+    Ok(())
+}
+
+fn stale_state_message(err: &str) -> String {
+    format!("The change was applied, but the device state could not be refreshed: {err}")
 }
 
 #[component]
@@ -111,9 +127,9 @@ pub(crate) fn Dashboard(
     ondisconnect: EventHandler<()>,
 ) -> Element {
     let mut active_tab = use_signal(|| ActiveTab::Overview);
-    // Owned here rather than by the interfaces panel: it blocks the whole
-    // workspace, not just that panel.
-    let confirm_ip = use_signal(|| false);
+    // Owned here rather than by the interfaces panel: confirming blocks the
+    // whole workspace, not just that panel.
+    let ip_operation = use_signal(|| IpOperation::Idle);
     let toast = Toast {
         message: use_signal(|| None),
         generation: use_signal(|| 0),
@@ -131,9 +147,8 @@ pub(crate) fn Dashboard(
     let overview_active = active_tab_view == ActiveTab::Overview;
     let wifi_active = active_tab_view == ActiveTab::Wifi;
     let interfaces_active = active_tab_view == ActiveTab::Interfaces;
-    let blocked = confirm_ip() || disconnecting;
+    let blocked = matches!(*ip_operation.read(), IpOperation::Confirming(_)) || disconnecting;
     let interfaces_view = snapshot_view.interfaces;
-    let overview_interfaces = interfaces_view.clone();
     let current_ssid = snapshot_view.wifi_status.ssid;
     let wifi_ssid = current_ssid
         .clone()
@@ -147,9 +162,9 @@ pub(crate) fn Dashboard(
         .wifi_status
         .security
         .as_ref()
-        .map(|security| format!("{security:?}"))
+        .map(|security| security_label(security).to_string())
         .unwrap_or_else(|| "Security unavailable".into());
-    let configured_interfaces = overview_interfaces
+    let configured_interfaces = interfaces_view
         .iter()
         .filter(|snapshot| !snapshot.config.addresses.is_empty())
         .count();
@@ -266,7 +281,7 @@ pub(crate) fn Dashboard(
                             small { "{wifi_security} · {wifi_signal}" }
                         }
                     }
-                    for interface_snapshot in overview_interfaces {
+                    for interface_snapshot in &interfaces_view {
                         {
                             let mac = interface_snapshot
                                 .interface
@@ -286,6 +301,7 @@ pub(crate) fn Dashboard(
                                 address_text
                             };
                             let method = ipv4_method_label(&interface_snapshot.config.method);
+                            let state = iface_state_label(&interface_snapshot.interface.state);
                             rsx! {
                                 div { class: "summary-row",
                                     div {
@@ -295,7 +311,7 @@ pub(crate) fn Dashboard(
                                     div { class: "summary-value mono",
                                         strong { "{address_text}" }
                                         small {
-                                            "{method} · {interface_snapshot.interface.state:?}"
+                                            "{method} · {state}"
                                         }
                                     }
                                 }
@@ -383,7 +399,7 @@ pub(crate) fn Dashboard(
             client,
             snapshot,
             toast,
-            confirm_ip,
+            ip_operation,
             active: interfaces_active,
             blocked,
             interfaces: interfaces_view,
@@ -442,7 +458,7 @@ fn WifiPanel(
             let security = network
                 .security
                 .as_ref()
-                .map(|security| format!("{security:?}"))
+                .map(|security| security_label(security).to_string())
                 .unwrap_or_else(|| "Unknown security".into());
             let signal = network
                 .signal
@@ -526,7 +542,9 @@ fn WifiPanel(
                             snapshot.wifi_status = status;
                         }
                     });
-                    refresh_snapshot(client, snapshot).await;
+                    if let Err(err) = refresh_snapshot(client, snapshot).await {
+                        wifi_error.set(Some(stale_state_message(&err)));
+                    }
                     wifi_password.set(String::new());
                     toast.show(format!("Connected to {ssid}"));
                 }
@@ -583,7 +601,7 @@ fn WifiPanel(
                                 let security = network
                                     .security
                                     .as_ref()
-                                    .map(|security| format!("{security:?}"))
+                                    .map(|security| security_label(security).to_string())
                                     .unwrap_or_else(|| "Unknown".to_string());
                                 let selected_network = network.clone();
                                 rsx! {
@@ -669,7 +687,7 @@ fn InterfacesPanel(
     client: Signal<Option<SharedClient>>,
     mut snapshot: Signal<Option<DeviceSnapshot>>,
     toast: Toast,
-    mut confirm_ip: Signal<bool>,
+    mut ip_operation: Signal<IpOperation>,
     active: bool,
     blocked: bool,
     interfaces: Vec<InterfaceSnapshot>,
@@ -679,17 +697,15 @@ fn InterfacesPanel(
     let mut address = use_signal(String::new);
     let mut gateway = use_signal(String::new);
     let mut dns = use_signal(String::new);
-    let mut ip_busy = use_signal(|| false);
     let mut ip_error = use_signal(|| None::<String>);
     let mut ip_invalid = use_signal(StaticIpv4Invalid::default);
     let mut restore_ip_focus = use_signal(|| false);
-    let mut pending_ip_change = use_signal(|| None::<(String, Option<StaticIpv4>)>);
     let mut apply_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
     let mut cancel_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
     let mut confirm_ip_button_element = use_signal(|| None::<Rc<MountedData>>);
 
     use_effect(move || {
-        if restore_ip_focus() && !confirm_ip() && !ip_busy() {
+        if restore_ip_focus() && *ip_operation.read() == IpOperation::Idle {
             restore_ip_focus.set(false);
             focus_mounted(apply_ip_button_element.cloned());
         }
@@ -703,8 +719,8 @@ fn InterfacesPanel(
     let dns_view = dns();
     let ip_error_view = ip_error();
     let ip_invalid_view = ip_invalid();
-    let confirm_ip_view = confirm_ip();
-    let ip_is_busy = ip_busy();
+    let confirm_ip_view = matches!(*ip_operation.read(), IpOperation::Confirming(_));
+    let ip_is_busy = *ip_operation.read() == IpOperation::Applying;
     let selected_interface_snapshot = selected_interface_view
         .as_deref()
         .and_then(|name| {
@@ -721,8 +737,8 @@ fn InterfacesPanel(
         .as_ref()
         .map(|snapshot| {
             format!(
-                "{:?} · {}",
-                snapshot.interface.iface_type,
+                "{} · {}",
+                iface_type_label(&snapshot.interface.iface_type),
                 snapshot
                     .interface
                     .mac
@@ -746,69 +762,69 @@ fn InterfacesPanel(
 
     let request_ip_change = move |event: FormEvent| {
         event.prevent_default();
+        if *ip_operation.read() != IpOperation::Idle {
+            return;
+        }
+        let (address, gateway, dns) = (address(), gateway(), dns());
+        let form = StaticIpv4Form {
+            address: &address,
+            gateway: &gateway,
+            dns: &dns,
+        };
         let invalid = if dhcp_mode() {
             StaticIpv4Invalid::default()
         } else {
-            static_ipv4_invalid_fields(&address(), &gateway(), &dns())
+            static_ipv4_invalid_fields(form)
         };
         ip_invalid.set(invalid);
-        match prepare_ip_change(
-            selected_interface(),
-            dhcp_mode(),
-            &address(),
-            &gateway(),
-            &dns(),
-        ) {
+        match prepare_ip_change(selected_interface(), dhcp_mode(), form) {
             Ok(change) => {
-                pending_ip_change.set(Some(change));
                 ip_error.set(None);
-                confirm_ip.set(true);
+                ip_operation.set(IpOperation::Confirming(change));
             }
-            Err(err) => {
-                confirm_ip.set(false);
-                ip_error.set(Some(err));
-            }
+            Err(err) => ip_error.set(Some(err)),
         }
     };
 
     let mut close_ip_confirmation = move || {
-        confirm_ip.set(false);
-        pending_ip_change.set(None);
-        restore_ip_focus.set(true);
+        let confirming = matches!(*ip_operation.peek(), IpOperation::Confirming(_));
+        if confirming {
+            ip_operation.set(IpOperation::Idle);
+            restore_ip_focus.set(true);
+        }
     };
 
     let apply_ip = move |_| {
-        // `disabled` only lands with the next render; a queued click can beat it.
-        if ip_busy() {
-            return;
-        }
         let Some(client) = client() else {
             return;
         };
-        let Some((iface, config)) = pending_ip_change() else {
+        // `disabled` only lands with the next render; a queued second click
+        // finds `Applying` here and stops.
+        let IpOperation::Confirming(change) = ip_operation() else {
             return;
         };
-        confirm_ip.set(false);
-        ip_busy.set(true);
+        ip_operation.set(IpOperation::Applying);
         ip_error.set(None);
         toast.clear();
         spawn(async move {
-            match apply_ip_config(client.clone(), iface.clone(), config).await {
+            let iface = change.iface.clone();
+            match apply_ip_config(client.clone(), change).await {
                 Ok(config) => {
                     snapshot.with_mut(|snapshot| {
                         if let Some(snapshot) = snapshot {
                             replace_interface_config(snapshot, &iface, config);
                         }
                     });
-                    pending_ip_change.set(None);
-                    refresh_snapshot(client, snapshot).await;
+                    if let Err(err) = refresh_snapshot(client, snapshot).await {
+                        ip_error.set(Some(stale_state_message(&err)));
+                    }
                     toast.show("Network configuration updated".into());
                 }
                 Err(err) => {
                     ip_error.set(Some(mutation_failure_message("Network configuration", err)))
                 }
             }
-            ip_busy.set(false);
+            ip_operation.set(IpOperation::Idle);
             restore_ip_focus.set(true);
         });
     };
@@ -841,13 +857,15 @@ fn InterfacesPanel(
                                     "interface-row"
                                 };
                                 let iface = interface_snapshot.interface.clone();
+                                let iface_kind = iface_type_label(&iface.iface_type);
+                                let iface_state = iface_state_label(&iface.state);
                                 let address_text = interface_snapshot
                                     .config
                                     .addresses
                                     .first()
                                     .map(ToString::to_string)
                                     .unwrap_or_else(|| "No address".into());
-                                let selected_snapshot = interface_snapshot.clone();
+                                let selected_snapshot = interface_snapshot;
                                 rsx! {
                                     button {
                                         class: row_class,
@@ -890,7 +908,7 @@ fn InterfacesPanel(
                                         span {
                                             strong { "{iface.name}" }
                                             small {
-                                                "{iface.iface_type:?} · {iface.state:?}"
+                                                "{iface_kind} · {iface_state}"
                                             }
                                         }
                                         span { class: "mono", "{address_text}" }
@@ -1026,7 +1044,6 @@ fn InterfacesPanel(
                             button {
                                 class: "secondary",
                                 r#type: "button",
-                                disabled: ip_is_busy,
                                 // `autofocus` only fires for the first one in a
                                 // document's lifetime, so a reopened dialog
                                 // would leave focus behind the inert workspace.
@@ -1047,7 +1064,6 @@ fn InterfacesPanel(
                             button {
                                 class: "primary",
                                 r#type: "button",
-                                disabled: ip_is_busy,
                                 onmounted: move |event| {
                                     confirm_ip_button_element.set(Some(event.data()))
                                 },
@@ -1065,6 +1081,33 @@ fn InterfacesPanel(
                 }
             }
         }
+    }
+}
+
+fn security_label(security: &Security) -> &'static str {
+    match security {
+        Security::Open => "Open",
+        Security::Wep => "WEP",
+        Security::WpaPsk => "WPA",
+        Security::Wpa2Psk => "WPA2",
+        Security::Wpa3 => "WPA3",
+    }
+}
+
+fn iface_type_label(iface_type: &IfaceType) -> &'static str {
+    match iface_type {
+        IfaceType::Ethernet => "Ethernet",
+        IfaceType::Wifi => "Wi-Fi",
+        IfaceType::Loopback => "Loopback",
+        IfaceType::Other => "Other",
+    }
+}
+
+fn iface_state_label(state: &IfaceState) -> &'static str {
+    match state {
+        IfaceState::Up => "Up",
+        IfaceState::Down => "Down",
+        IfaceState::Unknown => "Unknown",
     }
 }
 
